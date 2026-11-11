@@ -1,8 +1,8 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/HW/EXI/BBA/TAP_Win32.h"
+
 #include "Common/Assert.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
@@ -12,7 +12,7 @@
 
 namespace Win32TAPHelper
 {
-bool IsTAPDevice(const TCHAR* guid)
+static bool IsTAPDevice(const TCHAR* guid)
 {
   HKEY netcard_key;
   LONG status;
@@ -24,7 +24,7 @@ bool IsTAPDevice(const TCHAR* guid)
   if (status != ERROR_SUCCESS)
     return false;
 
-  for (;;)
+  while (true)
   {
     TCHAR enum_name[256];
     TCHAR unit_string[256];
@@ -66,11 +66,16 @@ bool IsTAPDevice(const TCHAR* guid)
 
         if (status == ERROR_SUCCESS && data_type == REG_SZ)
         {
-          if (!_tcscmp(component_id, TAP_COMPONENT_ID) && !_tcscmp(net_cfg_instance_id, guid))
+          TCHAR* const component_id_sub = _tcsstr(component_id, TAP_COMPONENT_ID);
+
+          if (component_id_sub)
           {
-            RegCloseKey(unit_key);
-            RegCloseKey(netcard_key);
-            return true;
+            if (!_tcscmp(component_id_sub, TAP_COMPONENT_ID) && !_tcscmp(net_cfg_instance_id, guid))
+            {
+              RegCloseKey(unit_key);
+              RegCloseKey(netcard_key);
+              return true;
+            }
           }
         }
       }
@@ -83,7 +88,7 @@ bool IsTAPDevice(const TCHAR* guid)
   return false;
 }
 
-bool GetGUIDs(std::vector<std::basic_string<TCHAR>>& guids)
+static bool GetGUIDs(std::vector<std::basic_string<TCHAR>>& guids)
 {
   LONG status;
   HKEY control_net_key;
@@ -150,7 +155,7 @@ bool GetGUIDs(std::vector<std::basic_string<TCHAR>>& guids)
   return !guids.empty();
 }
 
-bool OpenTAP(HANDLE& adapter, const std::basic_string<TCHAR>& device_guid)
+static bool OpenTAP(HANDLE& adapter, const std::basic_string<TCHAR>& device_guid)
 {
   auto const device_path = USERMODEDEVICEDIR + device_guid + TAPSUFFIX;
 

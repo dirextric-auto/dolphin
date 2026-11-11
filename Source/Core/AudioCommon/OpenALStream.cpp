@@ -1,19 +1,19 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #ifdef _WIN32
+
+#include "AudioCommon/OpenALStream.h"
 
 #include <windows.h>
 #include <climits>
 #include <cstring>
 #include <thread>
 
-#include "AudioCommon/OpenALStream.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 #include "Common/Thread.h"
-#include "Core/ConfigManager.h"
+#include "Core/Config/MainSettings.h"
 
 static HMODULE s_openal_dll = nullptr;
 
@@ -76,7 +76,7 @@ static bool InitLibrary()
 
   if (!InitFunctions())
   {
-    ::FreeLibrary(s_openal_dll);
+    FreeLibrary(s_openal_dll);
     s_openal_dll = nullptr;
     return false;
   }
@@ -84,7 +84,7 @@ static bool InitLibrary()
   return true;
 }
 
-bool OpenALStream::isValid()
+bool OpenALStream::IsValid()
 {
   return InitLibrary();
 }
@@ -127,9 +127,6 @@ bool OpenALStream::Init()
 OpenALStream::~OpenALStream()
 {
   m_run_thread.Clear();
-  // kick the thread if it's waiting
-  m_sound_sync_event.Set();
-
   m_thread.join();
 
   palSourceStop(m_source);
@@ -156,11 +153,6 @@ void OpenALStream::SetVolume(int volume)
     palSourcef(m_source, AL_GAIN, m_volume);
 }
 
-void OpenALStream::Update()
-{
-  m_sound_sync_event.Set();
-}
-
 bool OpenALStream::SetRunning(bool running)
 {
   if (running)
@@ -176,7 +168,7 @@ bool OpenALStream::SetRunning(bool running)
 
 static ALenum CheckALError(const char* desc)
 {
-  ALenum err = palGetError();
+  const ALenum err = palGetError();
 
   if (err != AL_NO_ERROR)
   {
@@ -219,22 +211,22 @@ void OpenALStream::SoundLoop()
 {
   Common::SetCurrentThreadName("Audio thread - openal");
 
-  bool float32_capable = palIsExtensionPresent("AL_EXT_float32") != 0;
-  bool surround_capable = palIsExtensionPresent("AL_EXT_MCFORMATS") || IsCreativeXFi();
-  bool use_surround = SConfig::GetInstance().ShouldUseDPL2Decoder() && surround_capable;
+  const bool float32_capable = palIsExtensionPresent("AL_EXT_float32") != 0;
+  const bool surround_capable = palIsExtensionPresent("AL_EXT_MCFORMATS") || IsCreativeXFi();
+  bool use_surround = Config::ShouldUseDPL2Decoder() && surround_capable;
 
   // As there is no extension to check for 32-bit fixed point support
   // and we know that only a X-Fi with hardware OpenAL supports it,
   // we just check if one is being used.
-  bool fixed32_capable = IsCreativeXFi();
+  const bool fixed32_capable = IsCreativeXFi();
 
-  u32 frequency = m_mixer->GetSampleRate();
+  const u32 frequency = m_mixer->GetSampleRate();
 
   u32 frames_per_buffer;
   // Can't have zero samples per buffer
-  if (SConfig::GetInstance().iLatency > 0)
+  if (Config::Get(Config::MAIN_AUDIO_LATENCY) > 0)
   {
-    frames_per_buffer = frequency / 1000 * SConfig::GetInstance().iLatency / OAL_BUFFERS;
+    frames_per_buffer = frequency / 1000 * Config::Get(Config::MAIN_AUDIO_LATENCY) / OAL_BUFFERS;
   }
   else
   {
@@ -296,12 +288,12 @@ void OpenALStream::SoundLoop()
       num_buffers_queued -= num_buffers_processed;
     }
 
-    unsigned int min_frames = frames_per_buffer;
+    const unsigned int min_frames = frames_per_buffer;
 
     if (use_surround)
     {
       std::array<float, OAL_MAX_FRAMES * SURROUND_CHANNELS> dpl2;
-      u32 rendered_frames = m_mixer->MixSurround(dpl2.data(), min_frames);
+      const u32 rendered_frames = static_cast<u32>(m_mixer->MixSurround(dpl2.data(), min_frames));
 
       if (rendered_frames < min_frames)
         continue;
@@ -359,7 +351,8 @@ void OpenALStream::SoundLoop()
     }
     else
     {
-      u32 rendered_frames = m_mixer->Mix(m_realtime_buffer.data(), min_frames);
+      const u32 rendered_frames =
+          static_cast<u32>(m_mixer->Mix(m_realtime_buffer.data(), min_frames));
 
       if (!rendered_frames)
         continue;

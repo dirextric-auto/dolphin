@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
@@ -9,7 +8,7 @@
 #include <utility>
 
 #include "Common/CommonTypes.h"
-#include "Common/GL/GLUtil.h"
+#include "Common/GL/GLExtensions/GLExtensions.h"
 
 namespace OGL
 {

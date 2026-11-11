@@ -1,6 +1,5 @@
 // Copyright 2019 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
@@ -25,14 +24,18 @@ private:
   void CreateWidgets();
   void ConnectWidgets();
 
+  void SetButtonEnableStates();
   void RefreshServerList();
 
   void OnServerAdded();
+  void OnServerEdited();
   void OnServerRemoved();
+  void OnServerSelection();
   void OnServersToggled();
 
   QCheckBox* m_servers_enabled;
   QListWidget* m_server_list;
   QPushButton* m_add_server;
+  QPushButton* m_edit_server;
   QPushButton* m_remove_server;
 };

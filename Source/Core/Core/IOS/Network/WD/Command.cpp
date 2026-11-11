@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/IOS/Network/WD/Command.h"
 
@@ -15,8 +14,9 @@
 #include "Core/DolphinAnalytics.h"
 #include "Core/HW/Memmap.h"
 #include "Core/IOS/Network/MACUtils.h"
+#include "Core/System.h"
 
-namespace IOS::HLE::Device
+namespace IOS::HLE
 {
 namespace
 {
@@ -28,7 +28,7 @@ constexpr u16 LegalNitroChannelMask = 0b0011'1111'1111'1110u;
 
 u16 SelectWifiChannel(u16 enabled_channels_mask, u16 current_channel)
 {
-  const Common::BitSet<u16> enabled_channels{enabled_channels_mask & LegalChannelMask};
+  const Common::BitSet<u16> enabled_channels(enabled_channels_mask & LegalChannelMask);
   u16 next_channel = current_channel;
   for (int i = 0; i < 16; ++i)
   {
@@ -48,7 +48,7 @@ u16 MakeNitroAllowedChannelMask(u16 enabled_channels_mask, u16 nitro_mask)
 }
 }  // namespace
 
-NetWDCommand::Status NetWDCommand::GetTargetStatusForMode(WD::Mode mode)
+NetWDCommandDevice::Status NetWDCommandDevice::GetTargetStatusForMode(WD::Mode mode)
 {
   switch (mode)
   {
@@ -61,13 +61,14 @@ NetWDCommand::Status NetWDCommand::GetTargetStatusForMode(WD::Mode mode)
   }
 }
 
-NetWDCommand::NetWDCommand(Kernel& ios, const std::string& device_name) : Device(ios, device_name)
+NetWDCommandDevice::NetWDCommandDevice(EmulationKernel& ios, const std::string& device_name)
+    : EmulationDevice(ios, device_name)
 {
   // TODO: use the MPCH setting in setting.txt to determine this value.
   m_nitro_enabled_channels = LegalNitroChannelMask;
 
   // TODO: Set the version string here. This is exposed to the PPC.
-  m_info.mac = IOS::Net::GetMACAddress();
+  m_info.mac = Net::GetMACAddress();
   m_info.enabled_channels = 0xfffe;
   m_info.channel = SelectWifiChannel(m_info.enabled_channels, 0);
   // The country code is supposed to be null terminated as it is logged with printf in WD.
@@ -77,15 +78,17 @@ NetWDCommand::NetWDCommand(Kernel& ios, const std::string& device_name) : Device
   m_info.initialised = true;
 }
 
-void NetWDCommand::Update()
+void NetWDCommandDevice::Update()
 {
   Device::Update();
   ProcessRecvRequests();
   HandleStateChange();
 }
 
-void NetWDCommand::ProcessRecvRequests()
+void NetWDCommandDevice::ProcessRecvRequests()
 {
+  auto& system = GetSystem();
+
   // Because we currently do not actually emulate the wireless driver, we have no frames
   // and no notification data that could be used to reply to requests.
   // Therefore, requests are left pending to simulate the situation where there is nothing to send.
@@ -116,7 +119,7 @@ void NetWDCommand::ProcessRecvRequests()
       }
 
       INFO_LOG_FMT(IOS_NET, "Processed request {:08x} (result {:08x})", request, result);
-      m_ios.EnqueueIPCReply(Request{request}, result);
+      GetEmulationKernel().EnqueueIPCReply(Request{system, request}, result);
       queue.pop_front();
     }
   };
@@ -125,7 +128,7 @@ void NetWDCommand::ProcessRecvRequests()
   process_queue(m_recv_frame_requests);
 }
 
-void NetWDCommand::HandleStateChange()
+void NetWDCommandDevice::HandleStateChange()
 {
   const auto status = m_status;
   const auto target_status = m_target_status;
@@ -168,7 +171,7 @@ void NetWDCommand::HandleStateChange()
                target_status);
 }
 
-void NetWDCommand::DoState(PointerWrap& p)
+void NetWDCommandDevice::DoState(PointerWrap& p)
 {
   Device::DoState(p);
   p.Do(m_ipc_owner_fd);
@@ -182,7 +185,7 @@ void NetWDCommand::DoState(PointerWrap& p)
   p.Do(m_recv_notification_requests);
 }
 
-IPCCommandResult NetWDCommand::Open(const OpenRequest& request)
+std::optional<IPCReply> NetWDCommandDevice::Open(const OpenRequest& request)
 {
   if (m_ipc_owner_fd < 0)
   {
@@ -195,8 +198,8 @@ IPCCommandResult NetWDCommand::Open(const OpenRequest& request)
     if (mode != WD::Mode::DSCommunications && mode != WD::Mode::AOSSAccessPointScan)
     {
       ERROR_LOG_FMT(IOS_NET, "Unsupported WD operating mode: {}", mode);
-      DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::USES_UNCOMMON_WD_MODE);
-      return GetDefaultReply(s32(ResultCode::UnavailableCommand));
+      DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::UsesUncommonWDMode);
+      return IPCReply(s32(ResultCode::UnavailableCommand));
     }
 
     if (m_target_status == Status::Idle && mode <= WD::Mode::Unknown6)
@@ -211,12 +214,12 @@ IPCCommandResult NetWDCommand::Open(const OpenRequest& request)
   return Device::Open(request);
 }
 
-IPCCommandResult NetWDCommand::Close(u32 fd)
+std::optional<IPCReply> NetWDCommandDevice::Close(u32 fd)
 {
   if (m_ipc_owner_fd < 0 || fd != u32(m_ipc_owner_fd))
   {
     ERROR_LOG_FMT(IOS_NET, "Invalid close attempt.");
-    return GetDefaultReply(u32(ResultCode::InvalidFd));
+    return IPCReply(u32(ResultCode::InvalidFd));
   }
 
   INFO_LOG_FMT(IOS_NET, "Closing and resetting status to Idle");
@@ -227,60 +230,65 @@ IPCCommandResult NetWDCommand::Close(u32 fd)
   return Device::Close(fd);
 }
 
-IPCCommandResult NetWDCommand::SetLinkState(const IOCtlVRequest& request)
+IPCReply NetWDCommandDevice::SetLinkState(const IOCtlVRequest& request)
 {
   const auto* vector = request.GetVector(0);
   if (!vector || vector->address == 0)
-    return GetDefaultReply(u32(ResultCode::IllegalParameter));
+    return IPCReply(u32(ResultCode::IllegalParameter));
 
-  const u32 state = Memory::Read_U32(vector->address);
+  auto& system = GetSystem();
+  auto& memory = system.GetMemory();
+  const u32 state = memory.Read_U32(vector->address);
   INFO_LOG_FMT(IOS_NET, "WD_SetLinkState called (state={}, mode={})", state, m_mode);
 
   if (state == 0)
   {
     if (!WD::IsValidMode(m_mode))
-      return GetDefaultReply(u32(ResultCode::UnavailableCommand));
+      return IPCReply(u32(ResultCode::UnavailableCommand));
 
-    INFO_LOG_FMT(IOS_NET, "WD_SetLinkState: setting target status to 1 (Idle)");
     m_target_status = Status::Idle;
+    INFO_LOG_FMT(IOS_NET, "WD_SetLinkState: setting target status to {}", m_target_status);
   }
   else
   {
     if (state != 1)
-      return GetDefaultReply(u32(ResultCode::IllegalParameter));
+      return IPCReply(u32(ResultCode::IllegalParameter));
 
     if (!WD::IsValidMode(m_mode))
-      return GetDefaultReply(u32(ResultCode::UnavailableCommand));
+      return IPCReply(u32(ResultCode::UnavailableCommand));
 
     const auto target_status = GetTargetStatusForMode(m_mode);
     if (m_status != target_status && m_info.enabled_channels == 0)
-      return GetDefaultReply(u32(ResultCode::UnavailableCommand));
+      return IPCReply(u32(ResultCode::UnavailableCommand));
 
     INFO_LOG_FMT(IOS_NET, "WD_SetLinkState: setting target status to {}", target_status);
     m_target_status = target_status;
   }
 
-  return GetDefaultReply(IPC_SUCCESS);
+  return IPCReply(IPC_SUCCESS);
 }
 
-IPCCommandResult NetWDCommand::GetLinkState(const IOCtlVRequest& request) const
+IPCReply NetWDCommandDevice::GetLinkState(const IOCtlVRequest& request) const
 {
   INFO_LOG_FMT(IOS_NET, "WD_GetLinkState called (status={}, mode={})", m_status, m_mode);
   if (!WD::IsValidMode(m_mode))
-    return GetDefaultReply(u32(ResultCode::UnavailableCommand));
+    return IPCReply(u32(ResultCode::UnavailableCommand));
 
   // Contrary to what the name of the ioctl suggests, this returns a boolean, not the current state.
-  return GetDefaultReply(u32(m_status == GetTargetStatusForMode(m_mode)));
+  return IPCReply(u32(m_status == GetTargetStatusForMode(m_mode)));
 }
 
-IPCCommandResult NetWDCommand::Disassociate(const IOCtlVRequest& request)
+IPCReply NetWDCommandDevice::Disassociate(const IOCtlVRequest& request)
 {
   const auto* vector = request.GetVector(0);
   if (!vector || vector->address == 0)
-    return GetDefaultReply(u32(ResultCode::IllegalParameter));
+    return IPCReply(u32(ResultCode::IllegalParameter));
+
+  auto& system = GetSystem();
+  auto& memory = system.GetMemory();
 
   Common::MACAddress mac;
-  Memory::CopyFromEmu(mac.data(), vector->address, mac.size());
+  memory.CopyFromEmu(mac.data(), vector->address, mac.size());
 
   INFO_LOG_FMT(IOS_NET, "WD_Disassociate: MAC {}", Common::MacAddressToString(mac));
 
@@ -288,7 +296,7 @@ IPCCommandResult NetWDCommand::Disassociate(const IOCtlVRequest& request)
       m_mode != WD::Mode::Unknown6)
   {
     ERROR_LOG_FMT(IOS_NET, "WD_Disassociate: cannot disassociate in mode {}", m_mode);
-    return GetDefaultReply(u32(ResultCode::UnavailableCommand));
+    return IPCReply(u32(ResultCode::UnavailableCommand));
   }
 
   const auto target_status = GetTargetStatusForMode(m_mode);
@@ -296,31 +304,33 @@ IPCCommandResult NetWDCommand::Disassociate(const IOCtlVRequest& request)
   {
     ERROR_LOG_FMT(IOS_NET, "WD_Disassociate: cannot disassociate in status {} (target {})",
                   m_status, target_status);
-    return GetDefaultReply(u32(ResultCode::UnavailableCommand));
+    return IPCReply(u32(ResultCode::UnavailableCommand));
   }
 
   // TODO: Check the input MAC address and only return 0x80008001 if it is unknown.
-  return GetDefaultReply(u32(ResultCode::IllegalParameter));
+  return IPCReply(u32(ResultCode::IllegalParameter));
 }
 
-IPCCommandResult NetWDCommand::GetInfo(const IOCtlVRequest& request) const
+IPCReply NetWDCommandDevice::GetInfo(const IOCtlVRequest& request) const
 {
   const auto* vector = request.GetVector(0);
   if (!vector || vector->address == 0)
-    return GetDefaultReply(u32(ResultCode::IllegalParameter));
+    return IPCReply(u32(ResultCode::IllegalParameter));
 
-  Memory::CopyToEmu(vector->address, &m_info, sizeof(m_info));
-  return GetDefaultReply(IPC_SUCCESS);
+  auto& system = GetSystem();
+  auto& memory = system.GetMemory();
+  memory.CopyToEmu(vector->address, &m_info, sizeof(m_info));
+  return IPCReply(IPC_SUCCESS);
 }
 
-IPCCommandResult NetWDCommand::IOCtlV(const IOCtlVRequest& request)
+std::optional<IPCReply> NetWDCommandDevice::IOCtlV(const IOCtlVRequest& request)
 {
   switch (request.request)
   {
   case IOCTLV_WD_INVALID:
-    return GetDefaultReply(u32(ResultCode::UnavailableCommand));
+    return IPCReply(u32(ResultCode::UnavailableCommand));
   case IOCTLV_WD_GET_MODE:
-    return GetDefaultReply(s32(m_mode));
+    return IPCReply(s32(m_mode));
   case IOCTLV_WD_SET_LINKSTATE:
     return SetLinkState(request);
   case IOCTLV_WD_GET_LINKSTATE:
@@ -332,9 +342,12 @@ IPCCommandResult NetWDCommand::IOCtlV(const IOCtlVRequest& request)
   {
     // Gives parameters detailing type of scan and what to match
     // XXX - unused
-    // ScanInfo *scan = (ScanInfo *)Memory::GetPointer(request.in_vectors.at(0).m_Address);
+    // ScanInfo *scan = (ScanInfo *)memory.GetPointer(request.in_vectors.at(0).m_Address);
 
-    u16* results = (u16*)Memory::GetPointer(request.io_vectors.at(0).address);
+    auto& system = GetSystem();
+    auto& memory = system.GetMemory();
+    u16* results = (u16*)memory.GetPointerForRange(request.io_vectors.at(0).address,
+                                                   sizeof(u16) + sizeof(BSSInfo));
     // first u16 indicates number of BSSInfo following
     results[0] = Common::swap16(1);
 
@@ -360,11 +373,11 @@ IPCCommandResult NetWDCommand::IOCtlV(const IOCtlVRequest& request)
 
   case IOCTLV_WD_RECV_FRAME:
     m_recv_frame_requests.emplace_back(request.address);
-    return GetNoReply();
+    return std::nullopt;
 
   case IOCTLV_WD_RECV_NOTIFICATION:
     m_recv_notification_requests.emplace_back(request.address);
-    return GetNoReply();
+    return std::nullopt;
 
   case IOCTLV_WD_SET_CONFIG:
   case IOCTLV_WD_GET_CONFIG:
@@ -377,10 +390,11 @@ IPCCommandResult NetWDCommand::IOCtlV(const IOCtlVRequest& request)
   case IOCTLV_WD_CHANGE_GAMEINFO:
   case IOCTLV_WD_CHANGE_VTSF:
   default:
-    DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::USES_WD_UNIMPLEMENTED_IOCTL);
-    request.Dump(GetDeviceName(), Common::Log::IOS_NET, Common::Log::LWARNING);
+    DolphinAnalytics::Instance().ReportGameQuirk(GameQuirk::UsesWDUnimplementedIOCtl);
+    request.Dump(GetSystem(), GetDeviceName(), Common::Log::LogType::IOS_NET,
+                 Common::Log::LogLevel::LWARNING);
   }
 
-  return GetDefaultReply(IPC_SUCCESS);
+  return IPCReply(IPC_SUCCESS);
 }
-}  // namespace IOS::HLE::Device
+}  // namespace IOS::HLE

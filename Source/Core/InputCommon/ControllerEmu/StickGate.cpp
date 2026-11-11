@@ -1,15 +1,16 @@
 // Copyright 2018 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "InputCommon/ControllerEmu/StickGate.h"
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
+#include <ranges>
 
 #include <fmt/format.h>
+#include <fmt/ranges.h>
 
-#include "Common/Common.h"
 #include "Common/MathUtil.h"
 #include "Common/Matrix.h"
 #include "Common/StringUtil.h"
@@ -34,7 +35,7 @@ std::optional<double> GetRayLineIntersection(Common::DVec2 ray, Common::DVec2 po
   const auto dot = diff.Dot({-ray.y, ray.x});
   if (std::abs(dot) < 0.00001)
   {
-    // Both points are on top of eachother.
+    // Both points are on top of each other.
     return std::nullopt;
   }
 
@@ -54,7 +55,7 @@ double GetNearestNotch(double angle, double virtual_notch_angle)
   constexpr auto rounding = MathUtil::TAU / sides;
   const auto closest_notch = std::round(angle / rounding) * rounding;
   const auto angle_diff =
-      std::fmod(angle - closest_notch + MathUtil::PI, MathUtil::TAU) - MathUtil::PI;
+      std::fmod(angle - closest_notch + std::numbers::pi, MathUtil::TAU) - std::numbers::pi;
   return std::abs(angle_diff) < virtual_notch_angle / 2 ? closest_notch : angle;
 }
 
@@ -80,12 +81,12 @@ OctagonStickGate::OctagonStickGate(ControlState radius) : m_radius(radius)
 ControlState OctagonStickGate::GetRadiusAtAngle(double angle) const
 {
   constexpr int sides = 8;
-  constexpr double sum_int_angles = (sides - 2) * MathUtil::PI;
+  constexpr double sum_int_angles = (sides - 2) * std::numbers::pi;
   constexpr double half_int_angle = sum_int_angles / sides / 2;
 
   angle = std::fmod(angle, MathUtil::TAU / sides);
   // Solve ASA triangle using The Law of Sines:
-  return m_radius / std::sin(MathUtil::PI - angle - half_int_angle) * std::sin(half_int_angle);
+  return m_radius / std::sin(std::numbers::pi - angle - half_int_angle) * std::sin(half_int_angle);
 }
 
 std::optional<u32> OctagonStickGate::GetIdealCalibrationSampleCount() const
@@ -128,6 +129,7 @@ std::optional<u32> SquareStickGate::GetIdealCalibrationSampleCount() const
 ReshapableInput::ReshapableInput(std::string name_, std::string ui_name_, GroupType type_)
     : ControlGroup(std::move(name_), std::move(ui_name_), type_)
 {
+  // 50 is not always enough but users can set it to more with an expression
   AddDeadzoneSetting(&m_deadzone_setting, 50);
 }
 
@@ -168,7 +170,7 @@ ControlState ReshapableInput::GetCalibrationDataRadiusAtAngle(const CalibrationD
                              GetPointFromAngleAndLength(sample1_angle, data[sample1_index]),
                              GetPointFromAngleAndLength(sample2_angle, data[sample2_index]));
 
-  // Intersection has no value when points are on top of eachother.
+  // Intersection has no value when points are on top of each other.
   return intersection.value_or(data[sample1_index]);
 }
 
@@ -226,12 +228,20 @@ void ReshapableInput::SetCenter(ReshapableInput::ReshapeData center)
   m_center = center;
 }
 
-void ReshapableInput::LoadConfig(IniFile::Section* section, const std::string& default_device,
-                                 const std::string& base_name)
+void ReshapableInput::LoadConfig(Common::IniFile::Section* section, const std::string& base_name)
 {
-  ControlGroup::LoadConfig(section, default_device, base_name);
+  ControlGroup::LoadConfig(section, base_name);
 
   const std::string group(base_name + name + '/');
+
+  // Special handling for "Modifier" button "Range" settings which default to 50% instead of 100%.
+  if (const auto* modifier_input = GetModifierInput())
+  {
+    section->Get(group + modifier_input->name + "/Range", &modifier_input->control_ref->range,
+                 50.0);
+    modifier_input->control_ref->range /= 100;
+  }
+
   std::string load_str;
   section->Get(group + CALIBRATION_CONFIG_NAME, &load_str, "");
   const auto load_data = SplitString(load_str, ' ');
@@ -260,17 +270,23 @@ void ReshapableInput::LoadConfig(IniFile::Section* section, const std::string& d
   }
 }
 
-void ReshapableInput::SaveConfig(IniFile::Section* section, const std::string& default_device,
-                                 const std::string& base_name)
+void ReshapableInput::SaveConfig(Common::IniFile::Section* section, const std::string& base_name)
 {
-  ControlGroup::SaveConfig(section, default_device, base_name);
+  ControlGroup::SaveConfig(section, base_name);
 
   const std::string group(base_name + name + '/');
-  std::vector<std::string> save_data(m_calibration.size());
-  std::transform(
-      m_calibration.begin(), m_calibration.end(), save_data.begin(),
-      [](ControlState val) { return fmt::format("{:.2f}", val * CALIBRATION_CONFIG_SCALE); });
-  section->Set(group + CALIBRATION_CONFIG_NAME, JoinStrings(save_data, " "), "");
+
+  // Special handling for "Modifier" button "Range" settings which default to 50% instead of 100%.
+  if (const auto* modifier_input = GetModifierInput())
+  {
+    section->Set(group + modifier_input->name + "/Range", modifier_input->control_ref->range * 100,
+                 50.0);
+  }
+
+  const std::ranges::transform_view scaled_calibration(
+      m_calibration, [](ControlState val) { return val * CALIBRATION_CONFIG_SCALE; });
+  section->Set(group + CALIBRATION_CONFIG_NAME,
+               fmt::format("{:.2f}", fmt::join(scaled_calibration, " ")), "");
 
   // Save center value.
   static constexpr char center_format[] = "{:.2f} {:.2f}";
@@ -280,13 +296,18 @@ void ReshapableInput::SaveConfig(IniFile::Section* section, const std::string& d
 }
 
 ReshapableInput::ReshapeData ReshapableInput::Reshape(ControlState x, ControlState y,
-                                                      ControlState modifier)
+                                                      ControlState modifier,
+                                                      ControlState clamp) const
 {
   x -= m_center.x;
   y -= m_center.y;
 
+  // We run this even if both x and y will be zero.
+  // In that case, std::atan2(0, 0) returns a valid non-NaN value, but the exact value
+  // (which depends on the signs of x and y) does not matter here as dist is zero
+
   // TODO: make the AtAngle functions work with negative angles:
-  ControlState angle = std::atan2(y, x) + MathUtil::TAU;
+  ControlState angle = std::atan2(y, x) + MathUtil::TAU_v<ControlState>;
 
   const ControlState input_max_dist = GetInputRadiusAtAngle(angle);
   ControlState gate_max_dist = GetGateRadiusAtAngle(angle);
@@ -308,11 +329,7 @@ ReshapableInput::ReshapeData ReshapableInput::Reshape(ControlState x, ControlSta
   // This is affected by the modifier's "range" setting which defaults to 50%.
   if (modifier)
   {
-    // TODO: Modifier's range setting gets reset to 100% when the clear button is clicked.
-    // This causes the modifier to not behave how a user might suspect.
-    // Retaining the old scale-by-50% behavior until range is fixed to clear to 50%.
-    dist *= 0.5;
-    // dist *= modifier;
+    dist *= modifier;
   }
 
   // Apply deadzone as a percentage of the user-defined calibration shape/size:
@@ -321,8 +338,13 @@ ReshapableInput::ReshapeData ReshapableInput::Reshape(ControlState x, ControlSta
   // Scale to the gate shape/radius:
   dist *= gate_max_dist;
 
-  return {std::clamp(std::cos(angle) * dist, -1.0, 1.0),
-          std::clamp(std::sin(angle) * dist, -1.0, 1.0)};
+  return {std::clamp(std::cos(angle) * dist, -clamp, clamp),
+          std::clamp(std::sin(angle) * dist, -clamp, clamp)};
+}
+
+Control* ReshapableInput::GetModifierInput() const
+{
+  return nullptr;
 }
 
 }  // namespace ControllerEmu

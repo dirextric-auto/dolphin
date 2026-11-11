@@ -1,6 +1,5 @@
 // Copyright 2020 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
@@ -11,10 +10,10 @@
 
 #include <bzlib.h>
 #include <lzma.h>
-#include <mbedtls/sha1.h>
 #include <zstd.h>
 
 #include "Common/CommonTypes.h"
+#include "Common/Crypto/SHA1.h"
 #include "DiscIO/LaggedFibonacciGenerator.h"
 
 namespace DiscIO
@@ -24,8 +23,6 @@ struct DecompressionBuffer
   std::vector<u8> data;
   size_t bytes_written = 0;
 };
-
-using SHA1 = std::array<u8, 20>;
 
 struct PurgeSegment
 {
@@ -41,7 +38,7 @@ public:
 
   virtual bool Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
                           size_t* in_bytes_read) = 0;
-  virtual bool Done() const { return m_done; };
+  virtual bool Done() const { return m_done; }
 
 protected:
   bool m_done = false;
@@ -72,13 +69,13 @@ private:
   size_t m_out_bytes_written = 0;
   bool m_started = false;
 
-  mbedtls_sha1_context m_sha1_context;
+  std::unique_ptr<Common::SHA1::Context> m_sha1_context;
 };
 
 class Bzip2Decompressor final : public Decompressor
 {
 public:
-  ~Bzip2Decompressor();
+  ~Bzip2Decompressor() override;
 
   bool Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
                   size_t* in_bytes_read) override;
@@ -92,7 +89,7 @@ class LZMADecompressor final : public Decompressor
 {
 public:
   LZMADecompressor(bool lzma2, const u8* filter_options, size_t filter_options_size);
-  ~LZMADecompressor();
+  ~LZMADecompressor() override;
 
   bool Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
                   size_t* in_bytes_read) override;
@@ -109,7 +106,7 @@ class ZstdDecompressor final : public Decompressor
 {
 public:
   ZstdDecompressor();
-  ~ZstdDecompressor();
+  ~ZstdDecompressor() override;
 
   bool Decompress(const DecompressionBuffer& in, DecompressionBuffer* out,
                   size_t* in_bytes_read) override;
@@ -142,7 +139,7 @@ private:
   u32 m_rvz_packed_size;
 
   u32 m_size = 0;
-  bool m_junk;
+  bool m_junk = false;
   LaggedFibonacciGenerator m_lfg;
 };
 
@@ -167,7 +164,7 @@ class PurgeCompressor final : public Compressor
 {
 public:
   PurgeCompressor();
-  ~PurgeCompressor();
+  ~PurgeCompressor() override;
 
   bool Start(std::optional<u64> size) override;
   bool AddPrecedingDataOnlyForPurgeHashing(const u8* data, size_t size) override;
@@ -179,15 +176,15 @@ public:
 
 private:
   std::vector<u8> m_buffer;
-  size_t m_bytes_written;
-  mbedtls_sha1_context m_sha1_context;
+  size_t m_bytes_written = 0;
+  std::unique_ptr<Common::SHA1::Context> m_sha1_context;
 };
 
 class Bzip2Compressor final : public Compressor
 {
 public:
   Bzip2Compressor(int compression_level);
-  ~Bzip2Compressor();
+  ~Bzip2Compressor() override;
 
   bool Start(std::optional<u64> size) override;
   bool Compress(const u8* data, size_t size) override;
@@ -209,7 +206,7 @@ class LZMACompressor final : public Compressor
 public:
   LZMACompressor(bool lzma2, int compression_level, u8 compressor_data_out[7],
                  u8* compressor_data_size_out);
-  ~LZMACompressor();
+  ~LZMACompressor() override;
 
   bool Start(std::optional<u64> size) override;
   bool Compress(const u8* data, size_t size) override;
@@ -232,7 +229,7 @@ class ZstdCompressor final : public Compressor
 {
 public:
   ZstdCompressor(int compression_level);
-  ~ZstdCompressor();
+  ~ZstdCompressor() override;
 
   bool Start(std::optional<u64> size) override;
   bool Compress(const u8* data, size_t size) override;
@@ -245,7 +242,7 @@ private:
   void ExpandBuffer(size_t bytes_to_add);
 
   ZSTD_CStream* m_stream;
-  ZSTD_outBuffer m_out_buffer;
+  ZSTD_outBuffer m_out_buffer{};
   std::vector<u8> m_buffer;
 };
 

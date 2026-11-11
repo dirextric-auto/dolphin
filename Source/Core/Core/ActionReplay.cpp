@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 // -----------------------------------------------------------------------------------------
 // Partial Action Replay code system implementation.
@@ -23,23 +22,26 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <iterator>
 #include <mutex>
 #include <string>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include <fmt/format.h>
 
-#include "Common/BitUtils.h"
 #include "Common/CommonTypes.h"
 #include "Common/IniFile.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 
 #include "Core/ARDecrypt.h"
+#include "Core/AchievementManager.h"
 #include "Core/CheatCodes.h"
-#include "Core/ConfigManager.h"
+#include "Core/Config/MainSettings.h"
+#include "Core/Debugger/PPCDebugInterface.h"
 #include "Core/PowerPC/MMU.h"
 
 namespace ActionReplay
@@ -111,16 +113,19 @@ struct ARAddr
 
 // ----------------------
 // AR Remote Functions
-void ApplyCodes(const std::vector<ARCode>& codes)
+void ApplyCodes(std::span<const ARCode> codes, const std::string& game_id, u16 revision)
 {
-  if (!SConfig::GetInstance().bEnableCheats)
+  if (!Config::AreCheatsEnabled())
     return;
 
   std::lock_guard guard(s_lock);
   s_disable_logging = false;
   s_active_codes.clear();
-  std::copy_if(codes.begin(), codes.end(), std::back_inserter(s_active_codes),
-               [](const ARCode& code) { return code.enabled; });
+
+  const auto should_be_activated = [&game_id, &revision](const ARCode& code) {
+    return AchievementManager::GetInstance().ShouldARCodeBeActivated(code, game_id, revision);
+  };
+  std::copy_if(codes.begin(), codes.end(), std::back_inserter(s_active_codes), should_be_activated);
   s_active_codes.shrink_to_fit();
 }
 
@@ -131,7 +136,7 @@ void SetSyncedCodesAsActive()
   s_active_codes = s_synced_codes;
 }
 
-void UpdateSyncedCodes(const std::vector<ARCode>& codes)
+void UpdateSyncedCodes(std::span<const ARCode> codes)
 {
   s_synced_codes.clear();
   s_synced_codes.reserve(codes.size());
@@ -140,9 +145,9 @@ void UpdateSyncedCodes(const std::vector<ARCode>& codes)
   s_synced_codes.shrink_to_fit();
 }
 
-std::vector<ARCode> ApplyAndReturnCodes(const std::vector<ARCode>& codes)
+std::vector<ARCode> ApplyAndReturnCodes(std::span<const ARCode> codes)
 {
-  if (SConfig::GetInstance().bEnableCheats)
+  if (Config::AreCheatsEnabled())
   {
     std::lock_guard guard(s_lock);
     s_disable_logging = false;
@@ -157,7 +162,7 @@ std::vector<ARCode> ApplyAndReturnCodes(const std::vector<ARCode>& codes)
 
 void AddCode(ARCode code)
 {
-  if (!SConfig::GetInstance().bEnableCheats)
+  if (!Config::AreCheatsEnabled())
     return;
 
   if (code.enabled)
@@ -168,18 +173,27 @@ void AddCode(ARCode code)
   }
 }
 
-void LoadAndApplyCodes(const IniFile& global_ini, const IniFile& local_ini)
+size_t CountEnabledCodes()
 {
-  ApplyCodes(LoadCodes(global_ini, local_ini));
+  if (!Config::AreCheatsEnabled())
+    return 0;
+
+  std::lock_guard guard(s_lock);
+  return s_active_codes.size();
+}
+
+void LoadAndApplyCodes(const Common::IniFile& global_ini, const Common::IniFile& local_ini,
+                       const std::string& game_id, u16 revision)
+{
+  ApplyCodes(LoadCodes(global_ini, local_ini), game_id, revision);
 }
 
 // Parses the Action Replay section of a game ini file.
-std::vector<ARCode> LoadCodes(const IniFile& global_ini, const IniFile& local_ini)
+std::vector<ARCode> LoadCodes(const Common::IniFile& global_ini, const Common::IniFile& local_ini)
 {
   std::vector<ARCode> codes;
 
-  const IniFile* inis[2] = {&global_ini, &local_ini};
-  for (const IniFile* ini : inis)
+  for (const auto* ini : {&global_ini, &local_ini})
   {
     std::vector<std::string> lines;
     std::vector<std::string> encrypted_lines;
@@ -215,42 +229,14 @@ std::vector<ARCode> LoadCodes(const IniFile& global_ini, const IniFile& local_in
       }
       else
       {
-        std::vector<std::string> pieces = SplitString(line, ' ');
+        const auto parse_result = DeserializeLine(line);
 
-        // Check if the AR code is decrypted
-        if (pieces.size() == 2 && pieces[0].size() == 8 && pieces[1].size() == 8)
-        {
-          AREntry op;
-          bool success_addr = TryParse(pieces[0], &op.cmd_addr, 16);
-          bool success_val = TryParse(pieces[1], &op.value, 16);
-
-          if (success_addr && success_val)
-          {
-            current_code.ops.push_back(op);
-          }
-          else
-          {
-            PanicAlertFmtT("Action Replay Error: invalid AR code line: {0}", line);
-
-            if (!success_addr)
-              PanicAlertFmtT("The address is invalid");
-
-            if (!success_val)
-              PanicAlertFmtT("The value is invalid");
-          }
-        }
+        if (std::holds_alternative<AREntry>(parse_result))
+          current_code.ops.push_back(std::get<AREntry>(parse_result));
+        else if (std::holds_alternative<EncryptedLine>(parse_result))
+          encrypted_lines.emplace_back(std::get<EncryptedLine>(parse_result));
         else
-        {
-          pieces = SplitString(line, '-');
-          if (pieces.size() == 3 && pieces[0].size() == 4 && pieces[1].size() == 4 &&
-              pieces[2].size() == 5)
-          {
-            // Encrypted AR code
-            // Decryption is done in "blocks", so we must push blocks into a vector,
-            // then send to decrypt when a new block is encountered, or if it's the last block.
-            encrypted_lines.emplace_back(pieces[0] + pieces[1] + pieces[2]);
-          }
-        }
+          PanicAlertFmtT("Action Replay Error: invalid AR code line: {0}", line);
       }
     }
 
@@ -277,7 +263,7 @@ std::vector<ARCode> LoadCodes(const IniFile& global_ini, const IniFile& local_in
   return codes;
 }
 
-void SaveCodes(IniFile* local_ini, const std::vector<ARCode>& codes)
+void SaveCodes(Common::IniFile* local_ini, std::span<const ARCode> codes)
 {
   std::vector<std::string> lines;
   std::vector<std::string> enabled_lines;
@@ -293,7 +279,7 @@ void SaveCodes(IniFile* local_ini, const std::vector<ARCode>& codes)
       lines.emplace_back('$' + code.name);
       for (const ActionReplay::AREntry& op : code.ops)
       {
-        lines.emplace_back(fmt::format("{:08X} {:08X}", op.cmd_addr, op.value));
+        lines.emplace_back(SerializeLine(op));
       }
     }
   }
@@ -303,14 +289,50 @@ void SaveCodes(IniFile* local_ini, const std::vector<ARCode>& codes)
   local_ini->SetLines("ActionReplay", lines);
 }
 
+std::variant<std::monostate, AREntry, EncryptedLine> DeserializeLine(const std::string& line)
+{
+  std::vector<std::string> pieces = SplitString(line, ' ');
+
+  // Decrypted AR code
+  if (pieces.size() == 2 && pieces[0].size() == 8 && pieces[1].size() == 8)
+  {
+    AREntry op;
+    bool success_addr = TryParse(pieces[0], &op.cmd_addr, 16);
+    bool success_val = TryParse(pieces[1], &op.value, 16);
+
+    if (success_addr && success_val)
+      return op;
+  }
+
+  // Encrypted AR code
+  pieces = SplitString(line, '-');
+  if (pieces.size() == 3 && pieces[0].size() == 4 && pieces[1].size() == 4 && pieces[2].size() == 5)
+  {
+    // Decryption is done in "blocks", so we can't decrypt right away. Instead we push blocks into
+    // a vector, then send to decrypt when a new block is encountered, or if it's the last block.
+    return pieces[0] + pieces[1] + pieces[2];
+  }
+
+  // Parsing failed
+  return std::monostate{};
+}
+
+std::string SerializeLine(const AREntry& op)
+{
+  return fmt::format("{:08X} {:08X}", op.cmd_addr, op.value);
+}
+
 static void VLogInfo(std::string_view format, fmt::format_args args)
 {
   if (s_disable_logging)
     return;
 
   const bool use_internal_log = s_use_internal_log.load(std::memory_order_relaxed);
-  if (MAX_LOGLEVEL < Common::Log::LINFO && !use_internal_log)
-    return;
+  if constexpr (Common::Log::MAX_EFFECTIVE_LOGLEVEL < Common::Log::LogLevel::LINFO)
+  {
+    if (!use_internal_log)
+      return;
+  }
 
   std::string text = fmt::vformat(format, args);
   INFO_LOG_FMT(ACTIONREPLAY, "{}", text);
@@ -352,7 +374,8 @@ bool IsSelfLogging()
 
 // ----------------------
 // Code Functions
-static bool Subtype_RamWriteAndFill(const ARAddr& addr, const u32 data)
+static bool Subtype_RamWriteAndFill(const Core::CPUThreadGuard& guard, const ARAddr& addr,
+                                    const u32 data)
 {
   const u32 new_addr = addr.GCAddress();
 
@@ -368,7 +391,7 @@ static bool Subtype_RamWriteAndFill(const ARAddr& addr, const u32 data)
     const u32 repeat = data >> 8;
     for (u32 i = 0; i <= repeat; ++i)
     {
-      PowerPC::HostWrite_U8(data & 0xFF, new_addr + i);
+      ApplyMemoryPatch<u8>(guard, static_cast<u8>(data), new_addr + i);
       LogInfo("Wrote {:08x} to address {:08x}", data & 0xFF, new_addr + i);
     }
     LogInfo("--------");
@@ -382,7 +405,7 @@ static bool Subtype_RamWriteAndFill(const ARAddr& addr, const u32 data)
     const u32 repeat = data >> 16;
     for (u32 i = 0; i <= repeat; ++i)
     {
-      PowerPC::HostWrite_U16(data & 0xFFFF, new_addr + i * 2);
+      ApplyMemoryPatch<u16>(guard, static_cast<u16>(data), new_addr + i * 2);
       LogInfo("Wrote {:08x} to address {:08x}", data & 0xFFFF, new_addr + i * 2);
     }
     LogInfo("--------");
@@ -393,7 +416,7 @@ static bool Subtype_RamWriteAndFill(const ARAddr& addr, const u32 data)
   case DATATYPE_32BIT:  // Dword write
     LogInfo("32-bit Write");
     LogInfo("--------");
-    PowerPC::HostWrite_U32(data, new_addr);
+    ApplyMemoryPatch<u32>(guard, data, new_addr);
     LogInfo("Wrote {:08x} to address {:08x}", data, new_addr);
     LogInfo("--------");
     break;
@@ -409,10 +432,11 @@ static bool Subtype_RamWriteAndFill(const ARAddr& addr, const u32 data)
   return true;
 }
 
-static bool Subtype_WriteToPointer(const ARAddr& addr, const u32 data)
+static bool Subtype_WriteToPointer(const Core::CPUThreadGuard& guard, const ARAddr& addr,
+                                   const u32 data)
 {
   const u32 new_addr = addr.GCAddress();
-  const u32 ptr = PowerPC::HostRead_U32(new_addr);
+  const u32 ptr = PowerPC::MMU::HostRead<u32>(guard, new_addr);
 
   LogInfo("Hardware Address: {:08x}", new_addr);
   LogInfo("Size: {:08x}", addr.size);
@@ -423,12 +447,12 @@ static bool Subtype_WriteToPointer(const ARAddr& addr, const u32 data)
   {
     LogInfo("Write 8-bit to pointer");
     LogInfo("--------");
-    const u8 thebyte = data & 0xFF;
+    const u8 thebyte = static_cast<u8>(data);
     const u32 offset = data >> 8;
     LogInfo("Pointer: {:08x}", ptr);
     LogInfo("Byte: {:08x}", thebyte);
     LogInfo("Offset: {:08x}", offset);
-    PowerPC::HostWrite_U8(thebyte, ptr + offset);
+    ApplyMemoryPatch<u8>(guard, thebyte, ptr + offset);
     LogInfo("Wrote {:08x} to address {:08x}", thebyte, ptr + offset);
     LogInfo("--------");
     break;
@@ -438,12 +462,12 @@ static bool Subtype_WriteToPointer(const ARAddr& addr, const u32 data)
   {
     LogInfo("Write 16-bit to pointer");
     LogInfo("--------");
-    const u16 theshort = data & 0xFFFF;
+    const u16 theshort = static_cast<u16>(data);
     const u32 offset = (data >> 16) << 1;
     LogInfo("Pointer: {:08x}", ptr);
     LogInfo("Byte: {:08x}", theshort);
     LogInfo("Offset: {:08x}", offset);
-    PowerPC::HostWrite_U16(theshort, ptr + offset);
+    ApplyMemoryPatch<u16>(guard, theshort, ptr + offset);
     LogInfo("Wrote {:08x} to address {:08x}", theshort, ptr + offset);
     LogInfo("--------");
     break;
@@ -453,7 +477,7 @@ static bool Subtype_WriteToPointer(const ARAddr& addr, const u32 data)
   case DATATYPE_32BIT:
     LogInfo("Write 32-bit to pointer");
     LogInfo("--------");
-    PowerPC::HostWrite_U32(data, ptr);
+    ApplyMemoryPatch<u32>(guard, data, ptr);
     LogInfo("Wrote {:08x} to address {:08x}", data, ptr);
     LogInfo("--------");
     break;
@@ -468,7 +492,7 @@ static bool Subtype_WriteToPointer(const ARAddr& addr, const u32 data)
   return true;
 }
 
-static bool Subtype_AddCode(const ARAddr& addr, const u32 data)
+static bool Subtype_AddCode(const Core::CPUThreadGuard& guard, const ARAddr& addr, const u32 data)
 {
   // Used to increment/decrement a value in memory
   const u32 new_addr = addr.GCAddress();
@@ -481,24 +505,27 @@ static bool Subtype_AddCode(const ARAddr& addr, const u32 data)
   case DATATYPE_8BIT:
     LogInfo("8-bit Add");
     LogInfo("--------");
-    PowerPC::HostWrite_U8(PowerPC::HostRead_U8(new_addr) + data, new_addr);
-    LogInfo("Wrote {:02x} to address {:08x}", PowerPC::HostRead_U8(new_addr), new_addr);
+    ApplyMemoryPatch<u8>(guard, PowerPC::MMU::HostRead<u8>(guard, new_addr) + data, new_addr);
+    LogInfo("Wrote {:02x} to address {:08x}", PowerPC::MMU::HostRead<u8>(guard, new_addr),
+            new_addr);
     LogInfo("--------");
     break;
 
   case DATATYPE_16BIT:
     LogInfo("16-bit Add");
     LogInfo("--------");
-    PowerPC::HostWrite_U16(PowerPC::HostRead_U16(new_addr) + data, new_addr);
-    LogInfo("Wrote {:04x} to address {:08x}", PowerPC::HostRead_U16(new_addr), new_addr);
+    ApplyMemoryPatch<u16>(guard, PowerPC::MMU::HostRead<u16>(guard, new_addr) + data, new_addr);
+    LogInfo("Wrote {:04x} to address {:08x}", PowerPC::MMU::HostRead<u16>(guard, new_addr),
+            new_addr);
     LogInfo("--------");
     break;
 
   case DATATYPE_32BIT:
     LogInfo("32-bit Add");
     LogInfo("--------");
-    PowerPC::HostWrite_U32(PowerPC::HostRead_U32(new_addr) + data, new_addr);
-    LogInfo("Wrote {:08x} to address {:08x}", PowerPC::HostRead_U32(new_addr), new_addr);
+    ApplyMemoryPatch<u32>(guard, PowerPC::MMU::HostRead<u32>(guard, new_addr) + data, new_addr);
+    LogInfo("Wrote {:08x} to address {:08x}", PowerPC::MMU::HostRead<u32>(guard, new_addr),
+            new_addr);
     LogInfo("--------");
     break;
 
@@ -507,12 +534,12 @@ static bool Subtype_AddCode(const ARAddr& addr, const u32 data)
     LogInfo("32-bit floating Add");
     LogInfo("--------");
 
-    const u32 read = PowerPC::HostRead_U32(new_addr);
-    const float read_float = Common::BitCast<float>(read);
+    const u32 read = PowerPC::MMU::HostRead<u32>(guard, new_addr);
+    const float read_float = std::bit_cast<float>(read);
     // data contains an (unsigned?) integer value
     const float fread = read_float + static_cast<float>(data);
-    const u32 newval = Common::BitCast<u32>(fread);
-    PowerPC::HostWrite_U32(newval, new_addr);
+    const u32 newval = std::bit_cast<u32>(fread);
+    ApplyMemoryPatch<u32>(guard, newval, new_addr);
     LogInfo("Old Value {:08x}", read);
     LogInfo("Increment {:08x}", data);
     LogInfo("New value {:08x}", newval);
@@ -544,7 +571,8 @@ static bool Subtype_MasterCodeAndWriteToCCXXXXXX(const ARAddr& addr, const u32 d
 }
 
 // This needs more testing
-static bool ZeroCode_FillAndSlide(const u32 val_last, const ARAddr& addr, const u32 data)
+static bool ZeroCode_FillAndSlide(const Core::CPUThreadGuard& guard, const u32 val_last,
+                                  const ARAddr& addr, const u32 data)
 {
   const u32 new_addr = ARAddr(val_last).GCAddress();
   const u8 size = ARAddr(val_last).size;
@@ -569,7 +597,7 @@ static bool ZeroCode_FillAndSlide(const u32 val_last, const ARAddr& addr, const 
     LogInfo("--------");
     for (int i = 0; i < write_num; ++i)
     {
-      PowerPC::HostWrite_U8(val & 0xFF, curr_addr);
+      ApplyMemoryPatch<u8>(guard, static_cast<u8>(val), curr_addr);
       curr_addr += addr_incr;
       val += val_incr;
       LogInfo("Write {:08x} to address {:08x}", val & 0xFF, curr_addr);
@@ -585,7 +613,7 @@ static bool ZeroCode_FillAndSlide(const u32 val_last, const ARAddr& addr, const 
     LogInfo("--------");
     for (int i = 0; i < write_num; ++i)
     {
-      PowerPC::HostWrite_U16(val & 0xFFFF, curr_addr);
+      ApplyMemoryPatch<u16>(guard, static_cast<u16>(val), curr_addr);
       LogInfo("Write {:08x} to address {:08x}", val & 0xFFFF, curr_addr);
       curr_addr += addr_incr * 2;
       val += val_incr;
@@ -600,7 +628,7 @@ static bool ZeroCode_FillAndSlide(const u32 val_last, const ARAddr& addr, const 
     LogInfo("--------");
     for (int i = 0; i < write_num; ++i)
     {
-      PowerPC::HostWrite_U32(val, curr_addr);
+      ApplyMemoryPatch<u32>(guard, val, curr_addr);
       LogInfo("Write {:08x} to address {:08x}", val, curr_addr);
       curr_addr += addr_incr * 4;
       val += val_incr;
@@ -623,7 +651,8 @@ static bool ZeroCode_FillAndSlide(const u32 val_last, const ARAddr& addr, const 
 // kenobi's "memory copy" Z-code. Requires an additional master code
 // on a real AR device. Documented here:
 // https://github.com/dolphin-emu/dolphin/wiki/GameCube-Action-Replay-Code-Types#type-z4-size-3--memory-copy
-static bool ZeroCode_MemoryCopy(const u32 val_last, const ARAddr& addr, const u32 data)
+static bool ZeroCode_MemoryCopy(const Core::CPUThreadGuard& guard, const u32 val_last,
+                                const ARAddr& addr, const u32 data)
 {
   const u32 addr_dest = val_last & ~0x06000000;
   const u32 addr_src = addr.GCAddress();
@@ -640,14 +669,15 @@ static bool ZeroCode_MemoryCopy(const u32 val_last, const ARAddr& addr, const u3
     {  // Memory Copy With Pointers Support
       LogInfo("Memory Copy With Pointers Support");
       LogInfo("--------");
-      const u32 ptr_dest = PowerPC::HostRead_U32(addr_dest);
+      const u32 ptr_dest = PowerPC::MMU::HostRead<u32>(guard, addr_dest);
       LogInfo("Resolved Dest Address to: {:08x}", ptr_dest);
-      const u32 ptr_src = PowerPC::HostRead_U32(addr_src);
+      const u32 ptr_src = PowerPC::MMU::HostRead<u32>(guard, addr_src);
       LogInfo("Resolved Src Address to: {:08x}", ptr_src);
       for (int i = 0; i < num_bytes; ++i)
       {
-        PowerPC::HostWrite_U8(PowerPC::HostRead_U8(ptr_src + i), ptr_dest + i);
-        LogInfo("Wrote {:08x} to address {:08x}", PowerPC::HostRead_U8(ptr_src + i), ptr_dest + i);
+        ApplyMemoryPatch<u8>(guard, PowerPC::MMU::HostRead<u8>(guard, ptr_src + i), ptr_dest + i);
+        LogInfo("Wrote {:08x} to address {:08x}", PowerPC::MMU::HostRead<u8>(guard, ptr_src + i),
+                ptr_dest + i);
       }
       LogInfo("--------");
     }
@@ -657,8 +687,8 @@ static bool ZeroCode_MemoryCopy(const u32 val_last, const ARAddr& addr, const u3
       LogInfo("--------");
       for (int i = 0; i < num_bytes; ++i)
       {
-        PowerPC::HostWrite_U8(PowerPC::HostRead_U8(addr_src + i), addr_dest + i);
-        LogInfo("Wrote {:08x} to address {:08x}", PowerPC::HostRead_U8(addr_src + i),
+        ApplyMemoryPatch<u8>(guard, PowerPC::MMU::HostRead<u8>(guard, addr_src + i), addr_dest + i);
+        LogInfo("Wrote {:08x} to address {:08x}", PowerPC::MMU::HostRead<u8>(guard, addr_src + i),
                 addr_dest + i);
       }
       LogInfo("--------");
@@ -675,25 +705,25 @@ static bool ZeroCode_MemoryCopy(const u32 val_last, const ARAddr& addr, const u3
   return true;
 }
 
-static bool NormalCode(const ARAddr& addr, const u32 data)
+static bool NormalCode(const Core::CPUThreadGuard& guard, const ARAddr& addr, const u32 data)
 {
   switch (addr.subtype)
   {
   case SUB_RAM_WRITE:  // Ram write (and fill)
     LogInfo("Doing Ram Write And Fill");
-    if (!Subtype_RamWriteAndFill(addr, data))
+    if (!Subtype_RamWriteAndFill(guard, addr, data))
       return false;
     break;
 
   case SUB_WRITE_POINTER:  // Write to pointer
     LogInfo("Doing Write To Pointer");
-    if (!Subtype_WriteToPointer(addr, data))
+    if (!Subtype_WriteToPointer(guard, addr, data))
       return false;
     break;
 
   case SUB_ADD_CODE:  // Increment Value
     LogInfo("Doing Add Code");
-    if (!Subtype_AddCode(addr, data))
+    if (!Subtype_AddCode(guard, addr, data))
       return false;
     break;
 
@@ -753,7 +783,8 @@ static bool CompareValues(const u32 val1, const u32 val2, const int type)
   }
 }
 
-static bool ConditionalCode(const ARAddr& addr, const u32 data, int* const pSkipCount)
+static bool ConditionalCode(const Core::CPUThreadGuard& guard, const ARAddr& addr, const u32 data,
+                            int* const pSkipCount)
 {
   const u32 new_addr = addr.GCAddress();
 
@@ -765,16 +796,17 @@ static bool ConditionalCode(const ARAddr& addr, const u32 data, int* const pSkip
   switch (addr.size)
   {
   case DATATYPE_8BIT:
-    result = CompareValues(PowerPC::HostRead_U8(new_addr), (data & 0xFF), addr.type);
+    result = CompareValues(PowerPC::MMU::HostRead<u8>(guard, new_addr), (data & 0xFF), addr.type);
     break;
 
   case DATATYPE_16BIT:
-    result = CompareValues(PowerPC::HostRead_U16(new_addr), (data & 0xFFFF), addr.type);
+    result =
+        CompareValues(PowerPC::MMU::HostRead<u16>(guard, new_addr), (data & 0xFFFF), addr.type);
     break;
 
   case DATATYPE_32BIT_FLOAT:
   case DATATYPE_32BIT:
-    result = CompareValues(PowerPC::HostRead_U32(new_addr), data, addr.type);
+    result = CompareValues(PowerPC::MMU::HostRead<u32>(guard, new_addr), data, addr.type);
     break;
 
   default:
@@ -813,7 +845,7 @@ static bool ConditionalCode(const ARAddr& addr, const u32 data, int* const pSkip
 }
 
 // NOTE: Lock needed to give mutual exclusion to s_current_code and LogInfo
-static bool RunCodeLocked(const ARCode& arcode)
+static bool RunCodeLocked(const Core::CPUThreadGuard& guard, const ARCode& arcode)
 {
   // The mechanism is different than what the real AR uses, so there may be compatibility problems.
 
@@ -867,7 +899,7 @@ static bool RunCodeLocked(const ARCode& arcode)
     {
       do_fill_and_slide = false;
       LogInfo("Doing Fill And Slide");
-      if (false == ZeroCode_FillAndSlide(val_last, addr, data))
+      if (false == ZeroCode_FillAndSlide(guard, val_last, addr, data))
         return false;
       continue;
     }
@@ -877,7 +909,7 @@ static bool RunCodeLocked(const ARCode& arcode)
     {
       do_memory_copy = false;
       LogInfo("Doing Memory Copy");
-      if (false == ZeroCode_MemoryCopy(val_last, addr, data))
+      if (false == ZeroCode_MemoryCopy(guard, val_last, addr, data))
         return false;
       continue;
     }
@@ -956,13 +988,13 @@ static bool RunCodeLocked(const ARCode& arcode)
     switch (addr.type)
     {
     case 0x00:
-      if (false == NormalCode(addr, data))
+      if (false == NormalCode(guard, addr, data))
         return false;
       break;
 
     default:
       LogInfo("This Normal Code is a Conditional Code");
-      if (false == ConditionalCode(addr, data, &skip_count))
+      if (false == ConditionalCode(guard, addr, data, &skip_count))
         return false;
       break;
     }
@@ -971,22 +1003,20 @@ static bool RunCodeLocked(const ARCode& arcode)
   return true;
 }
 
-void RunAllActive()
+void RunAllActive(const Core::CPUThreadGuard& cpu_guard)
 {
-  if (!SConfig::GetInstance().bEnableCheats)
+  if (!Config::AreCheatsEnabled())
     return;
 
   // If the mutex is idle then acquiring it should be cheap, fast mutexes
   // are only atomic ops unless contested. It should be rare for this to
   // be contested.
   std::lock_guard guard(s_lock);
-  s_active_codes.erase(std::remove_if(s_active_codes.begin(), s_active_codes.end(),
-                                      [](const ARCode& code) {
-                                        bool success = RunCodeLocked(code);
-                                        LogInfo("\n");
-                                        return !success;
-                                      }),
-                       s_active_codes.end());
+  std::erase_if(s_active_codes, [&cpu_guard](const ARCode& code) {
+    const bool success = RunCodeLocked(cpu_guard, code);
+    LogInfo("\n");
+    return !success;
+  });
   s_disable_logging = true;
 }
 

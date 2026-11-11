@@ -1,11 +1,11 @@
 // Copyright 2018 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "DolphinQt/TAS/IRWidget.h"
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 
 #include <QMouseEvent>
 #include <QPainter>
@@ -24,16 +24,21 @@ IRWidget::IRWidget(QWidget* parent) : QWidget(parent)
   setMinimumSize(QSize(64, 48));
 }
 
+QSize IRWidget::sizeHint() const
+{
+  return QSize(128, 96);
+}
+
 void IRWidget::SetX(u16 x)
 {
-  m_x = std::min(ir_max_x, x);
+  m_x = std::min(IR_MAX_X, x);
 
   update();
 }
 
 void IRWidget::SetY(u16 y)
 {
-  m_y = std::min(ir_max_y, y);
+  m_y = std::min(IR_MAX_Y, y);
 
   update();
 }
@@ -55,13 +60,13 @@ void IRWidget::paintEvent(QPaintEvent* event)
   painter.drawLine(PADDING + w / 2, PADDING, PADDING + w / 2, PADDING + h);
 
   // convert from value space to widget space
-  u16 x = PADDING + (w - (m_x * w) / ir_max_x);
-  u16 y = PADDING + ((m_y * h) / ir_max_y);
+  u16 x = PADDING + ((m_x * w) / IR_MAX_X);
+  u16 y = PADDING + (h - (m_y * h) / IR_MAX_Y);
 
   painter.drawLine(PADDING + w / 2, PADDING + h / 2, x, y);
 
   painter.setBrush(Qt::blue);
-  int wh_avg = (w + h) / 2;
+  int wh_avg = std::midpoint(w, h);
   int radius = wh_avg / 30;
   painter.drawEllipse(x - radius, y - radius, radius * 2, radius * 2);
 }
@@ -80,22 +85,36 @@ void IRWidget::mouseMoveEvent(QMouseEvent* event)
 
 void IRWidget::handleMouseEvent(QMouseEvent* event)
 {
+  u16 prev_x = m_x;
+  u16 prev_y = m_y;
+
   if (event->button() == Qt::RightButton)
   {
-    m_x = std::round(ir_max_x / 2.);
-    m_y = std::round(ir_max_y / 2.);
+    m_x = std::round(IR_MAX_X / 2.);
+    m_y = std::round(IR_MAX_Y / 2.);
   }
   else
   {
     // convert from widget space to value space
-    int new_x = ir_max_x - (event->x() * ir_max_x) / width();
-    int new_y = (event->y() * ir_max_y) / height();
+    int new_x = (event->pos().x() * IR_MAX_X) / width();
+    int new_y = IR_MAX_Y - (event->pos().y() * IR_MAX_Y) / height();
 
-    m_x = std::max(0, std::min(static_cast<int>(ir_max_x), new_x));
-    m_y = std::max(0, std::min(static_cast<int>(ir_max_y), new_y));
+    m_x = std::max(0, std::min(static_cast<int>(IR_MAX_X), new_x));
+    m_y = std::max(0, std::min(static_cast<int>(IR_MAX_Y), new_y));
   }
 
-  emit ChangedX(m_x);
-  emit ChangedY(m_y);
-  update();
+  bool changed = false;
+  if (prev_x != m_x)
+  {
+    emit ChangedX(m_x);
+    changed = true;
+  }
+  if (prev_y != m_y)
+  {
+    emit ChangedY(m_y);
+    changed = true;
+  }
+
+  if (changed)
+    update();
 }

@@ -1,6 +1,5 @@
 // Copyright 2019 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
@@ -25,6 +24,11 @@ union TVec3
   {
   }
 
+  constexpr bool operator==(const TVec3& other) const
+  {
+    return x == other.x && y == other.y && z == other.z;
+  }
+
   constexpr TVec3 Cross(const TVec3& rhs) const
   {
     return {(y * rhs.z) - (rhs.y * z), (z * rhs.x) - (rhs.z * x), (x * rhs.y) - (rhs.x * y)};
@@ -33,6 +37,10 @@ union TVec3
   constexpr T LengthSquared() const { return Dot(*this); }
   T Length() const { return std::sqrt(LengthSquared()); }
   TVec3 Normalized() const { return *this / Length(); }
+  static constexpr TVec3<T> Lerp(const TVec3<T>& a, const TVec3<T>& b, const TVec3<T>& t)
+  {
+    return {std::lerp(a.x, b.x, t.x), std::lerp(a.y, b.y, t.y), std::lerp(a.z, b.z, t.z)};
+  }
 
   constexpr TVec3& operator+=(const TVec3& rhs)
   {
@@ -154,6 +162,21 @@ union TVec4
   constexpr TVec4(TVec3<T> _vec, T _w) : TVec4{_vec.x, _vec.y, _vec.z, _w} {}
   constexpr TVec4(T _x, T _y, T _z, T _w) : data{_x, _y, _z, _w} {}
 
+  constexpr bool operator==(const TVec4& other) const
+  {
+    return x == other.x && y == other.y && z == other.z && w == other.w;
+  }
+
+  static constexpr TVec4<T> Lerp(const TVec4<T>& a, const TVec4<T>& b, const TVec4<T>& t)
+  {
+    return {
+        std::lerp(a.x, b.x, t.x),
+        std::lerp(a.y, b.y, t.y),
+        std::lerp(a.z, b.z, t.z),
+        std::lerp(a.w, b.w, t.w),
+    };
+  }
+
   constexpr T Dot(const TVec4& other) const
   {
     return x * other.x + y * other.y + z * other.z + w * other.w;
@@ -216,6 +239,8 @@ union TVec2
   constexpr explicit TVec2(const TVec2<OtherT>& other) : TVec2(other.x, other.y)
   {
   }
+
+  constexpr bool operator==(const TVec2& other) const { return x == other.x && y == other.y; }
 
   constexpr T Cross(const TVec2& rhs) const { return (x * rhs.y) - (y * rhs.x); }
   constexpr T Dot(const TVec2& rhs) const { return (x * rhs.x) + (y * rhs.y); }
@@ -337,7 +362,7 @@ public:
   static Quaternion RotateY(float rad);
   static Quaternion RotateZ(float rad);
 
-  // Returns a quaternion with rotations about each axis simulatenously (e.g processing gyroscope
+  // Returns a quaternion with rotations about each axis simultaneously (e.g processing gyroscope
   // input)
   static Quaternion RotateXYZ(const Vec3& rads);
 
@@ -359,6 +384,8 @@ public:
 Quaternion operator*(Quaternion lhs, const Quaternion& rhs);
 Vec3 operator*(const Quaternion& lhs, const Vec3& rhs);
 
+Vec3 FromQuaternionToEuler(const Quaternion& q);
+
 class Matrix33
 {
 public:
@@ -378,7 +405,9 @@ public:
   static void Multiply(const Matrix33& a, const Matrix33& b, Matrix33* result);
   static void Multiply(const Matrix33& a, const Vec3& vec, Vec3* result);
 
+  float Determinant() const;
   Matrix33 Inverted() const;
+  Matrix33 Transposed() const;
 
   Matrix33& operator*=(const Matrix33& rhs)
   {
@@ -418,6 +447,10 @@ public:
 
   // For when a vec4 isn't needed a multiplication function that takes a Vec3 and w:
   Vec3 Transform(const Vec3& point, float w) const;
+
+  float Determinant() const;
+  Matrix44 Inverted() const;
+  Matrix44 Transposed() const;
 
   Matrix44& operator*=(const Matrix44& rhs)
   {

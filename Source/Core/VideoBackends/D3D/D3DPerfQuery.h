@@ -1,6 +1,5 @@
 // Copyright 2012 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
@@ -14,10 +13,10 @@ class PerfQuery : public PerfQueryBase
 {
 public:
   PerfQuery();
-  ~PerfQuery();
+  ~PerfQuery() override;
 
-  void EnableQuery(PerfQueryGroup type) override;
-  void DisableQuery(PerfQueryGroup type) override;
+  void EnableQuery(PerfQueryGroup group) override;
+  void DisableQuery(PerfQueryGroup group) override;
   void ResetQuery() override;
   u32 GetQueryResult(PerfQueryType type) override;
   void FlushResults() override;
@@ -27,7 +26,7 @@ private:
   struct ActiveQuery
   {
     ComPtr<ID3D11Query> query;
-    PerfQueryGroup query_type;
+    PerfQueryGroup query_group{};
   };
 
   void WeakFlush();

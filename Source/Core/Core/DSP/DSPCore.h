@@ -1,7 +1,6 @@
 // Copyright 2008 Dolphin Emulator Project
 // Copyright 2004 Duddie & Tratax
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
@@ -123,15 +122,23 @@ enum : int
   DSP_REG_AXH1 = 0x1b,
 
   // Accumulator (global)
-  DSP_REG_ACC0 = 0x1c,
-  DSP_REG_ACC1 = 0x1d,
-
   DSP_REG_ACL0 = 0x1c,  // Low accumulator
   DSP_REG_ACL1 = 0x1d,
   DSP_REG_ACM0 = 0x1e,  // Mid accumulator
   DSP_REG_ACM1 = 0x1f,
   DSP_REG_ACH0 = 0x10,  // Sign extended 8 bit register 0
-  DSP_REG_ACH1 = 0x11   // Sign extended 8 bit register 1
+  DSP_REG_ACH1 = 0x11,  // Sign extended 8 bit register 1
+};
+
+enum : int
+{
+  // Magic values used by DSPTables.h
+  // These do not correspond to real registers like above, but instead combined versions of the
+  // registers.
+  DSP_REG_ACC0_FULL = 0x20,
+  DSP_REG_ACC1_FULL = 0x21,
+  DSP_REG_AX0_FULL = 0x22,
+  DSP_REG_AX1_FULL = 0x23,
 };
 
 // Hardware registers address
@@ -145,10 +152,10 @@ enum : u32
   DSP_DSMAH = 0xce,  // DSP DMA Address High (External)
   DSP_DSMAL = 0xcf,  // DSP DMA Address Low (External)
 
-  DSP_FORMAT = 0xd1,   // Sample format
-  DSP_ACUNK = 0xd2,    // Set to 3 on my dumps
-  DSP_ACDATA1 = 0xd3,  // Used only by Zelda ucodes
-  DSP_ACSAH = 0xd4,    // Start of loop
+  DSP_FORMAT = 0xd1,  // Sample format
+  DSP_ACUNK = 0xd2,   // Set to 3 on my dumps
+  DSP_ACDRAW = 0xd3,  // Raw accelerator accesses
+  DSP_ACSAH = 0xd4,   // Start of loop
   DSP_ACSAL = 0xd5,
   DSP_ACEAH = 0xd6,  // End of sample (and loop)
   DSP_ACEAL = 0xd7,
@@ -157,9 +164,9 @@ enum : u32
   DSP_PRED_SCALE = 0xda,  // ADPCM predictor and scale
   DSP_YN1 = 0xdb,
   DSP_YN2 = 0xdc,
-  DSP_ACCELERATOR = 0xdd,  // ADPCM accelerator read. Used by AX.
+  DSP_ACDSAMP = 0xdd,  // Accelerator sample reads, processed differently depending on FORMAT
   DSP_GAIN = 0xde,
-  DSP_ACUNK2 = 0xdf,  // Set to 0xc on my dumps
+  DSP_ACIN = 0xdf,  // Feeds PCM samples written here
 
   DSP_AMDM = 0xef,  // ARAM DMA Request Mask 0: DMA with ARAM unmasked 1: masked
 
@@ -201,7 +208,7 @@ enum : u16
   SR_LOGIC_ZERO = 0x0040,
   SR_OVERFLOW_STICKY =
       0x0080,  // Set at the same time as 0x2 (under same conditions) - but not cleared the same
-  SR_100 = 0x0100,         // Unknown
+  SR_100 = 0x0100,         // Unknown, always reads back as 0
   SR_INT_ENABLE = 0x0200,  // Not 100% sure but duddie says so. This should replace the hack, if so.
   SR_400 = 0x0400,         // Unknown
   SR_EXT_INT_ENABLE = 0x0800,  // Appears in zelda - seems to disable external interrupts
@@ -219,13 +226,13 @@ enum : u16
 // Exception vectors
 enum class ExceptionType
 {
-  StackOverflow = 1,        // 0x0002 stack under/over flow
-  EXP_2 = 2,                // 0x0004
-  EXP_3 = 3,                // 0x0006
-  EXP_4 = 4,                // 0x0008
-  AcceleratorOverflow = 5,  // 0x000a accelerator address overflow
-  EXP_6 = 6,                // 0x000c
-  ExternalInterrupt = 7     // 0x000e external int (message from CPU)
+  StackOverflow = 1,                  // 0x0002 stack under/over flow
+  EXP_2 = 2,                          // 0x0004
+  AcceleratorRawReadOverflow = 3,     // 0x0006 accelerator raw read address overflow
+  AcceleratorRawWriteOverflow = 4,    // 0x0008 accelerator raw write address overflow
+  AcceleratorSampleReadOverflow = 5,  // 0x000a accelerator sample reads address overflow
+  EXP_6 = 6,                          // 0x000c
+  ExternalInterrupt = 7               // 0x000e external int (message from CPU)
 };
 
 enum class Mailbox
@@ -272,7 +279,7 @@ struct DSP_Regs
     {
       u16 l;
       u16 m;
-      u16 h;
+      u32 h;  // 32 bits so that val is fully sign-extended (only 8 bits are actually used)
     };
   } ac[2];
 };
@@ -280,10 +287,10 @@ struct DSP_Regs
 struct DSPInitOptions
 {
   // DSP IROM blob, which is where the DSP boots from. Embedded into the DSP.
-  std::array<u16, DSP_IROM_SIZE> irom_contents;
+  std::array<u16, DSP_IROM_SIZE> irom_contents{};
 
   // DSP DROM blob, which contains resampling coefficients.
-  std::array<u16, DSP_COEF_SIZE> coef_contents;
+  std::array<u16, DSP_COEF_SIZE> coef_contents{};
 
   // Core used to emulate the DSP.
   // Default: JIT64.
@@ -376,7 +383,7 @@ struct SDSP
   void SetException(ExceptionType exception);
 
   // Checks if any exceptions occurred an updates the DSP state as appropriate.
-  void CheckExceptions();
+  bool CheckExceptions();
 
   // Notify that an external interrupt is pending (used by thread mode)
   void SetExternalInterrupt(bool val);
@@ -412,15 +419,16 @@ struct SDSP
   DSP_Regs r{};
   u16 pc = 0;
 
-  // This is NOT the same cr as r.cr.
+  // This is NOT the same as r.cr.
   // This register is shared with the main emulation, see DSP.cpp
   // The engine has control over 0x0C07 of this reg.
   // Bits are defined in a struct in DSP.cpp.
-  u16 cr = 0;
+  u16 control_reg = 0;
+  u64 control_reg_init_code_clear_time = 0;
 
   u8 reg_stack_ptrs[4]{};
   u8 exceptions = 0;  // pending exceptions
-  volatile bool external_interrupt_waiting = false;
+  std::atomic<bool> external_interrupt_waiting = false;
   bool reset_dspjit_codespace = false;
 
   // DSP hardware stacks. They're mapped to a bunch of registers, such that writes
@@ -522,7 +530,7 @@ public:
   void CheckExternalInterrupt();
 
   // Checks if any exceptions occurred an updates the DSP state as appropriate.
-  void CheckExceptions();
+  bool CheckExceptions();
 
   // Reads the current value from a particular register.
   u16 ReadRegister(size_t reg) const;
@@ -570,14 +578,10 @@ public:
   Interpreter::Interpreter& GetInterpreter() { return *m_dsp_interpreter; }
   const Interpreter::Interpreter& GetInterpreter() const { return *m_dsp_interpreter; }
 
-  bool GetInitHax() const { return m_init_hax; }
-  void SetInitHax(bool value) { m_init_hax = value; }
-
 private:
   SDSP m_dsp;
   DSPBreakpoints m_dsp_breakpoints;
   State m_core_state = State::Stopped;
-  bool m_init_hax = false;
   std::unique_ptr<Interpreter::Interpreter> m_dsp_interpreter;
   std::unique_ptr<JIT::DSPEmitter> m_dsp_jit;
   std::unique_ptr<DSPCaptureLogger> m_dsp_cap;

@@ -1,6 +1,5 @@
 // Copyright 2015 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
@@ -14,10 +13,10 @@ public:
   bool Initialize(const WindowSystemInfo& wsi) override;
   void Shutdown() override;
 
-  std::string GetName() const override { return NAME; }
+  std::string GetConfigName() const override { return CONFIG_NAME; }
   std::string GetDisplayName() const override;
-  void InitBackendInfo() override;
+  void InitBackendInfo(const WindowSystemInfo& wsi) override;
 
-  static constexpr const char* NAME = "Null";
+  static constexpr const char* CONFIG_NAME = "Null";
 };
 }  // namespace Null

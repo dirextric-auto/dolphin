@@ -1,12 +1,11 @@
 // Copyright 2013 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
 #ifdef _WIN32
-#include <WinSock2.h>
 #include <iphlpapi.h>
+#include <winsock2.h>
 #include <ws2tcpip.h>
 
 typedef pollfd pollfd_t;
@@ -16,36 +15,28 @@ typedef pollfd pollfd_t;
 #define FREE(x) HeapFree(GetProcessHeap(), 0, (x))
 
 #elif defined(__linux__) or defined(__APPLE__) or defined(__FreeBSD__) or defined(__NetBSD__) or   \
-    defined(__HAIKU__)
+    defined(__OpenBSD__) or defined(__HAIKU__)
 #include <arpa/inet.h>
+#include <fcntl.h>
+#include <net/if.h>
 #include <netdb.h>
+#include <netinet/in.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
-#if defined(ANDROID) || defined(__HAIKU__)
-#include <fcntl.h>
-#else
-#include <sys/fcntl.h>
-#endif
-#include <errno.h>
-#include <net/if.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <string.h>
 
 typedef struct pollfd pollfd_t;
 #else
-#include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
-#include <sys/fcntl.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #endif
 
-#include <algorithm>
-#include <cstdio>
+#include <chrono>
 #include <list>
-#include <string>
+#include <optional>
 #include <string_view>
 #include <unordered_map>
 #include <utility>
@@ -173,17 +164,20 @@ struct WiiSockAddrIn
 };
 #pragma pack(pop)
 
+class WiiSockMan;
+
 class WiiSocket
 {
 public:
-  WiiSocket() = default;
+  explicit WiiSocket(WiiSockMan& socket_manager) : m_socket_manager(socket_manager) {}
   WiiSocket(const WiiSocket&) = delete;
-  WiiSocket(WiiSocket&&) = default;
+  WiiSocket(WiiSocket&&) = delete;
   ~WiiSocket();
   WiiSocket& operator=(const WiiSocket&) = delete;
-  WiiSocket& operator=(WiiSocket&&) = default;
+  WiiSocket& operator=(WiiSocket&&) = delete;
 
 private:
+  using Timeout = std::chrono::time_point<std::chrono::steady_clock>;
   struct sockop
   {
     Request request;
@@ -194,7 +188,14 @@ private:
       NET_IOCTL net_type;
       SSL_IOCTL ssl_type;
     };
-    void Abort(s32 value);
+  };
+
+  enum class ConnectingState
+  {
+    None,
+    Connecting,
+    Connected,
+    Error
   };
 
   friend class WiiSockMan;
@@ -203,15 +204,28 @@ private:
   s32 Shutdown(u32 how);
   s32 CloseFd();
   s32 FCntl(u32 cmd, u32 arg);
+  void Abort(sockop* op, s32 value) const;
 
-  void DoSock(Request request, NET_IOCTL type);
-  void DoSock(Request request, SSL_IOCTL type);
+  const Timeout& GetTimeout();
+  void ResetTimeout();
+
+  void DoSock(const Request& request, NET_IOCTL type);
+  void DoSock(const Request& request, SSL_IOCTL type);
   void Update(bool read, bool write, bool except);
+  void UpdateConnectingState(s32 connect_rv);
+  ConnectingState GetConnectingState() const;
   bool IsValid() const { return fd >= 0; }
+  bool IsTCP() const;
+
+  WiiSockMan& m_socket_manager;
+
   s32 fd = -1;
   s32 wii_fd = -1;
   bool nonBlock = false;
+  ConnectingState connecting_state = ConnectingState::None;
   std::list<sockop> pending_sockops;
+
+  std::optional<Timeout> timeout;
 };
 
 class WiiSockMan
@@ -225,23 +239,25 @@ public:
 
   struct PollCommand
   {
-    u32 request_addr;
-    u32 buffer_out;
+    u32 request_addr = 0;
+    u32 buffer_out = 0;
     std::vector<pollfd_t> wii_fds;
-    s64 timeout;
+    s64 timeout = 0;
   };
 
-  static s32 GetNetErrorCode(s32 ret, std::string_view caller, bool is_rw);
-  static char* DecodeError(s32 ErrorCode);
+  explicit WiiSockMan(EmulationKernel& ios);
+  WiiSockMan(const WiiSockMan&) = delete;
+  WiiSockMan& operator=(const WiiSockMan&) = delete;
+  WiiSockMan(WiiSockMan&&) = delete;
+  WiiSockMan& operator=(WiiSockMan&&) = delete;
+  ~WiiSockMan();
 
-  static WiiSockMan& GetInstance()
-  {
-    static WiiSockMan instance;  // Guaranteed to be destroyed.
-    return instance;             // Instantiated on first use.
-  }
+  s32 GetNetErrorCode(s32 ret, std::string_view caller, bool is_rw);
+
   void Update();
-  static void Convert(WiiSockAddrIn const& from, sockaddr_in& to);
-  static void Convert(sockaddr_in const& from, WiiSockAddrIn& to, s32 addrlen = -1);
+  static sockaddr_in ToNativeAddrIn(WiiSockAddrIn from);
+  static WiiSockAddrIn ToWiiAddrIn(const sockaddr_in& from,
+                                   socklen_t addrlen = sizeof(WiiSockAddrIn));
   static s32 ConvertEvents(s32 events, ConvertDirection dir);
 
   void DoState(PointerWrap& p);
@@ -256,6 +272,7 @@ public:
   s32 GetLastNetError() const { return errno_last; }
   void SetLastNetError(s32 error) { errno_last = error; }
   void Clean() { WiiSockets.clear(); }
+  void EnqueueIPCReply(const Request& request, s32 return_value) const;
   template <typename T>
   void DoSock(s32 sock, const Request& request, T type)
   {
@@ -263,8 +280,8 @@ public:
     if (socket_entry == WiiSockets.end())
     {
       ERROR_LOG_FMT(IOS_NET, "DoSock: Error, fd not found ({:08x}, {:08X}, {:08X})", sock,
-                    request.address, type);
-      GetIOS()->EnqueueIPCReply(request, -SO_EBADF);
+                    request.address, std::to_underlying(type));
+      EnqueueIPCReply(request, -SO_EBADF);
     }
     else
     {
@@ -275,18 +292,14 @@ public:
   void UpdateWantDeterminism(bool want);
 
 private:
-  WiiSockMan() = default;
-  WiiSockMan(const WiiSockMan&) = delete;
-  WiiSockMan& operator=(const WiiSockMan&) = delete;
-  WiiSockMan(WiiSockMan&&) = delete;
-  WiiSockMan& operator=(WiiSockMan&&) = delete;
-
   void UpdatePollCommands();
 
+  friend class WiiSocket;
+
+  EmulationKernel& m_ios;
   std::unordered_map<s32, WiiSocket> WiiSockets;
-  s32 errno_last;
+  s32 errno_last = 0;
   std::vector<PollCommand> pending_polls;
-  std::chrono::time_point<std::chrono::high_resolution_clock> last_time =
-      std::chrono::high_resolution_clock::now();
+  TimePoint last_time = Clock::now();
 };
 }  // namespace IOS::HLE

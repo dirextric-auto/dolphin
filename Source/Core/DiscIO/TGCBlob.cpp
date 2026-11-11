@@ -1,17 +1,15 @@
 // Copyright 2016 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "DiscIO/TGCBlob.h"
 
 #include <algorithm>
 #include <memory>
-#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
-#include "Common/IOFile.h"
+#include "Common/BitUtils.h"
 #include "Common/Swap.h"
 
 namespace
@@ -29,8 +27,8 @@ void Replace(u64 offset, u64 size, u8* out_ptr, u64 replace_offset, u64 replace_
 
   if (replace_end > replace_start)
   {
-    std::copy(replace_ptr + (replace_start - replace_offset),
-              replace_ptr + (replace_end - replace_offset), out_ptr + (replace_start - offset));
+    std::copy_n(replace_ptr + (replace_start - replace_offset), replace_end - replace_start,
+                out_ptr + (replace_start - offset));
   }
 }
 
@@ -46,27 +44,30 @@ void Replace(u64 offset, u64 size, u8* out_ptr, u64 replace_offset, const T& rep
 
 namespace DiscIO
 {
-std::unique_ptr<TGCFileReader> TGCFileReader::Create(File::IOFile file)
+std::unique_ptr<TGCFileReader> TGCFileReader::Create(File::DirectIOFile file)
 {
   TGCHeader header;
-  if (file.Seek(0, SEEK_SET) && file.ReadArray(&header, 1) && header.magic == TGC_MAGIC)
+  if (file.OffsetRead(0, Common::AsWritableU8Span(header)) && header.magic == TGC_MAGIC)
+  {
     return std::unique_ptr<TGCFileReader>(new TGCFileReader(std::move(file)));
+  }
 
   return nullptr;
 }
 
-TGCFileReader::TGCFileReader(File::IOFile file) : m_file(std::move(file))
+TGCFileReader::TGCFileReader(File::DirectIOFile file) : m_file(std::move(file))
 {
-  m_file.Seek(0, SEEK_SET);
-  m_file.ReadArray(&m_header, 1);
+  m_file.OffsetRead(0, Common::AsWritableU8Span(m_header));
 
   m_size = m_file.GetSize();
 
   const u32 fst_offset = Common::swap32(m_header.fst_real_offset);
   const u32 fst_size = Common::swap32(m_header.fst_size);
   m_fst.resize(fst_size);
-  if (!m_file.Seek(fst_offset, SEEK_SET) || !m_file.ReadBytes(m_fst.data(), m_fst.size()))
+  if (!m_file.OffsetRead(fst_offset, m_fst))
+  {
     m_fst.clear();
+  }
 
   constexpr size_t FST_ENTRY_SIZE = 12;
   if (m_fst.size() < FST_ENTRY_SIZE)
@@ -93,6 +94,11 @@ TGCFileReader::TGCFileReader(File::IOFile file) : m_file(std::move(file))
   }
 }
 
+std::unique_ptr<BlobReader> TGCFileReader::CopyReader() const
+{
+  return Create(m_file);
+}
+
 u64 TGCFileReader::GetDataSize() const
 {
   return m_size - Common::swap32(m_header.tgc_header_size);
@@ -102,7 +108,7 @@ bool TGCFileReader::Read(u64 offset, u64 nbytes, u8* out_ptr)
 {
   const u32 tgc_header_size = Common::swap32(m_header.tgc_header_size);
 
-  if (m_file.Seek(offset + tgc_header_size, SEEK_SET) && m_file.ReadBytes(out_ptr, nbytes))
+  if (m_file.OffsetRead(offset + tgc_header_size, out_ptr, nbytes))
   {
     const u32 replacement_dol_offset = SubtractBE32(m_header.dol_real_offset, tgc_header_size);
     const u32 replacement_fst_offset = SubtractBE32(m_header.fst_real_offset, tgc_header_size);
@@ -115,7 +121,6 @@ bool TGCFileReader::Read(u64 offset, u64 nbytes, u8* out_ptr)
     return true;
   }
 
-  m_file.Clear();
   return false;
 }
 

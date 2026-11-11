@@ -1,14 +1,12 @@
 // Copyright 2019 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
 #include "Common/ChunkFile.h"
 #include "Common/CommonTypes.h"
-#include "Core/HW/WiimoteEmu/Dynamics.h"
+#include "Common/Matrix.h"
 #include "Core/HW/WiimoteEmu/I2CBus.h"
-#include "InputCommon/ControllerEmu/ControlGroup/Cursor.h"
 
 namespace Common
 {
@@ -17,11 +15,25 @@ class Matrix44;
 
 namespace WiimoteEmu
 {
+using IRObject = Common::TVec2<u16>;
+
+struct CameraPoint
+{
+  IRObject position;
+  u8 size;
+
+  // 0xFFFFs are interpreted as "not visible".
+  constexpr CameraPoint() : position({0xffff, 0xffff}), size(0xff) {}
+  constexpr CameraPoint(IRObject position_, u8 size_) : position(position_), size(size_) {}
+  constexpr bool operator==(const CameraPoint& other) const
+  {
+    return this->position == other.position && this->size == other.size;
+  }
+};
+
 // Four bytes for two objects. Filled with 0xFF if empty
 struct IRBasic
 {
-  using IRObject = Common::TVec2<u16>;
-
   u8 x1;
   u8 y1;
   u8 x2hi : 2;
@@ -60,8 +72,8 @@ struct IRExtended
   u8 xhi : 2;
   u8 yhi : 2;
 
-  auto GetPosition() const { return IRBasic::IRObject(xhi << 8 | x, yhi << 8 | y); }
-  void SetPosition(const IRBasic::IRObject& obj)
+  auto GetPosition() const { return IRObject(xhi << 8 | x, yhi << 8 | y); }
+  void SetPosition(const IRObject& obj)
   {
     x = obj.x;
     xhi = obj.x >> 8;
@@ -100,7 +112,7 @@ public:
   // Jordan: I calculate the FOV at 42 degrees horizontally and having a 4:3 aspect ratio.
   // This is 31.5 degrees vertically.
   static constexpr float CAMERA_AR = 4.f / 3;
-  static constexpr float CAMERA_FOV_X = 42 * float(MathUtil::TAU) / 360;
+  static constexpr float CAMERA_FOV_X = MathUtil::DegreesToRadians(42.0f);
   static constexpr float CAMERA_FOV_Y = CAMERA_FOV_X / CAMERA_AR;
 
   enum : u8
@@ -110,9 +122,19 @@ public:
     IR_MODE_FULL = 5,
   };
 
+  // FYI: A real wiimote normally only returns 1 point for each LED cluster (2 total).
+  // Sending all 4 points can actually cause some stuttering issues.
+  static constexpr int NUM_POINTS = 4;
+
+  // Range from 0-15. Small values (2-4) seem to be very typical.
+  // This is reduced based on distance from sensor bar.
+  static constexpr int MAX_POINT_SIZE = 15;
+
   void Reset();
   void DoState(PointerWrap& p);
-  void Update(const Common::Matrix44& transform, Common::Vec2 field_of_view);
+  static std::array<CameraPoint, NUM_POINTS> GetCameraPoints(const Common::Matrix44& transform,
+                                                             Common::Vec2 field_of_view);
+  void Update(const std::array<CameraPoint, NUM_POINTS>& camera_points);
   void SetEnabled(bool is_enabled);
 
   static constexpr u8 I2C_ADDR = 0x58;
@@ -156,10 +178,10 @@ private:
   int BusRead(u8 slave_addr, u8 addr, int count, u8* data_out) override;
   int BusWrite(u8 slave_addr, u8 addr, int count, const u8* data_in) override;
 
-  Register m_reg_data;
+  Register m_reg_data{};
 
   // When disabled the camera does not respond on the bus.
   // Change is triggered by wiimote report 0x13.
-  bool m_is_enabled;
+  bool m_is_enabled = false;
 };
 }  // namespace WiimoteEmu

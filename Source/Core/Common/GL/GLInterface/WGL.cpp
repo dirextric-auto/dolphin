@@ -1,12 +1,12 @@
 // Copyright 2012 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include "Common/GL/GLInterface/WGL.h"
 
 #include <windows.h>
 #include <array>
 #include <string>
 
-#include "Common/GL/GLInterface/WGL.h"
 #include "Common/Logging/Log.h"
 #include "Common/MsgHandler.h"
 
@@ -143,7 +143,7 @@ static void LoadWGLExtensions()
   wglReleasePbufferDCARB =
       reinterpret_cast<PFNWGLRELEASEPBUFFERDCARBPROC>(wglGetProcAddress("wglReleasePbufferDCARB"));
   wglDestroyPbufferARB =
-      reinterpret_cast<PFNWGLDESTROYPBUFFERARBPROC>(wglGetProcAddress("wglGetPbufferDCARB"));
+      reinterpret_cast<PFNWGLDESTROYPBUFFERARBPROC>(wglGetProcAddress("wglDestroyPbufferARB"));
 }
 
 static void ClearWGLExtensionPointers()
@@ -223,7 +223,7 @@ void* GLContextWGL::GetFuncAddress(const std::string& name)
     func = GetProcAddress(opengl_module, name.c_str());
   }
 
-  return func;
+  return reinterpret_cast<void*>(func);
 }
 
 // Create rendering window.
@@ -234,7 +234,7 @@ bool GLContextWGL::Initialize(const WindowSystemInfo& wsi, bool stereo, bool cor
     return false;
 
   RECT window_rect = {};
-  m_window_handle = reinterpret_cast<HWND>(wsi.render_surface);
+  m_window_handle = static_cast<HWND>(wsi.render_surface);
   if (!GetClientRect(m_window_handle, &window_rect))
     return false;
 
@@ -397,20 +397,9 @@ HGLRC GLContextWGL::CreateCoreContext(HDC dc, HGLRC share_context)
                                       0};
 
     // Attempt creating this context.
-    HGLRC core_context = wglCreateContextAttribsARB(dc, nullptr, attribs.data());
+    HGLRC core_context = wglCreateContextAttribsARB(dc, share_context, attribs.data());
     if (core_context)
     {
-      // If we're creating a shared context, share the resources before the context is used.
-      if (share_context)
-      {
-        if (!wglShareLists(share_context, core_context))
-        {
-          ERROR_LOG_FMT(VIDEO, "wglShareLists failed");
-          wglDeleteContext(core_context);
-          return nullptr;
-        }
-      }
-
       INFO_LOG_FMT(VIDEO, "WGL: Created a GL {}.{} core context", version.first, version.second);
       return core_context;
     }

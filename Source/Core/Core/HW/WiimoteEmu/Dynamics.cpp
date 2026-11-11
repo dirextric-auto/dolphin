@@ -1,16 +1,17 @@
 // Copyright 2019 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/HW/WiimoteEmu/Dynamics.h"
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
+#include <optional>
 
 #include "Common/MathUtil.h"
+#include "Common/Matrix.h"
 #include "Core/Config/SYSCONFSettings.h"
 #include "Core/HW/WiimoteEmu/WiimoteEmu.h"
-#include "InputCommon/ControllerEmu/ControlGroup/Buttons.h"
 #include "InputCommon/ControllerEmu/ControlGroup/Cursor.h"
 #include "InputCommon/ControllerEmu/ControlGroup/Force.h"
 #include "InputCommon/ControllerEmu/ControlGroup/IMUAccelerometer.h"
@@ -67,7 +68,7 @@ Common::Quaternion ComplementaryFilter(const Common::Quaternion& gyroscope,
 
   const auto cos_angle = normalized_accel.Dot(gyro_vec);
 
-  // If gyro to accel angle difference is betwen 0 and 180 degrees we make an adjustment.
+  // If gyro to accel angle difference is between 0 and 180 degrees we make an adjustment.
   const auto abs_cos_angle = std::abs(cos_angle);
   if (abs_cos_angle > 0 && abs_cos_angle < 1)
   {
@@ -78,10 +79,6 @@ Common::Quaternion ComplementaryFilter(const Common::Quaternion& gyroscope,
   {
     return gyroscope;
   }
-}
-
-IMUCursorState::IMUCursorState() : rotation{Common::Quaternion::Identity()}
-{
 }
 
 void EmulateShake(PositionalState* state, ControllerEmu::Shake* const shake_group,
@@ -117,8 +114,8 @@ void EmulateTilt(RotationalState* state, ControllerEmu::Tilt* const tilt_group, 
   const auto target = tilt_group->GetState();
 
   // 180 degrees is currently the max tilt value.
-  const ControlState roll = target.x * MathUtil::PI;
-  const ControlState pitch = target.y * MathUtil::PI;
+  const ControlState roll = target.x * std::numbers::pi;
+  const ControlState pitch = target.y * std::numbers::pi;
 
   const auto target_angle = Common::Vec3(pitch, -roll, 0);
 
@@ -126,7 +123,7 @@ void EmulateTilt(RotationalState* state, ControllerEmu::Tilt* const tilt_group, 
   for (std::size_t i = 0; i != target_angle.data.size(); ++i)
   {
     auto& angle = state->angle.data[i];
-    if (std::abs(angle - target_angle.data[i]) > float(MathUtil::PI))
+    if (std::abs(angle - target_angle.data[i]) > std::numbers::pi_v<float>)
       angle -= std::copysign(MathUtil::TAU, angle);
   }
 
@@ -150,9 +147,9 @@ void EmulateSwing(MotionState* state, ControllerEmu::Force* swing_group, float t
   const auto xz_target_dist = Common::Vec2{target_position.x, target_position.z}.Length();
   const auto y_target_dist = std::abs(target_position.y);
   const auto target_dist = Common::Vec3{xz_target_dist, y_target_dist, xz_target_dist};
-  const auto speed = MathUtil::Lerp(Common::Vec3{1, 1, 1} * float(swing_group->GetReturnSpeed()),
-                                    Common::Vec3{1, 1, 1} * float(swing_group->GetSpeed()),
-                                    target_dist / max_distance);
+  const auto speed = Common::Vec3::Lerp(
+      Common::Vec3{1, 1, 1} * float(swing_group->GetReturnSpeed()),
+      Common::Vec3{1, 1, 1} * float(swing_group->GetSpeed()), target_dist / max_distance);
 
   // Convert our m/s "speed" to the jerk required to reach this speed when traveling 1 meter.
   const auto max_jerk = speed * speed * speed * 4;
@@ -226,9 +223,10 @@ WiimoteCommon::AccelData ConvertAccelData(const Common::Vec3& accel, u16 zero_g,
        u16(std::clamp(std::lround(scaled_accel.z + zero_g), 0l, MAX_VALUE))});
 }
 
-void EmulatePoint(MotionState* state, ControllerEmu::Cursor* ir_group, float time_elapsed)
+void EmulatePoint(MotionState* state, ControllerEmu::Cursor* ir_group,
+                  const ControllerEmu::InputOverrideFunction& override_func, float time_elapsed)
 {
-  const auto cursor = ir_group->GetState(true);
+  const auto cursor = ir_group->GetState(true, override_func);
 
   if (!cursor.IsVisible())
   {
@@ -269,7 +267,7 @@ void EmulatePoint(MotionState* state, ControllerEmu::Cursor* ir_group, float tim
   // Higher values will be more responsive but increase rate of M+ "desync".
   // I'd rather not expose this value in the UI if not needed.
   // At this value, sync is very good and responsiveness still appears instant.
-  constexpr auto MAX_ACCEL = float(MathUtil::TAU * 8);
+  constexpr auto MAX_ACCEL = MathUtil::TAU_v<float> * 8;
 
   ApproachAngleWithAccel(state, target_angle, MAX_ACCEL, time_elapsed);
 }
@@ -314,7 +312,7 @@ void EmulateIMUCursor(IMUCursorState* state, ControllerEmu::IMUCursor* imu_ir_gr
   const auto ang_vel = imu_gyroscope_group->GetState();
 
   // Reset if pointing is disabled or we have no gyro data.
-  if (!imu_ir_group->enabled || !ang_vel.has_value())
+  if (!imu_ir_group->enabled.GetValue() || !ang_vel.has_value())
   {
     *state = {};
     return;
@@ -325,10 +323,10 @@ void EmulateIMUCursor(IMUCursorState* state, ControllerEmu::IMUCursor* imu_ir_gr
   state->rotation = gyro_rotation * state->rotation;
 
   // If we have some non-zero accel data use it to adjust gyro drift.
-  constexpr auto ACCEL_WEIGHT = 0.02f;
+  const auto accel_weight = imu_ir_group->GetAccelWeight();
   auto const accel = imu_accelerometer_group->GetState().value_or(Common::Vec3{});
   if (accel.LengthSquared())
-    state->rotation = ComplementaryFilter(state->rotation, accel, ACCEL_WEIGHT);
+    state->rotation = ComplementaryFilter(state->rotation, accel, accel_weight);
 
   // Clamp yaw within configured bounds.
   const auto yaw = GetYaw(state->rotation);
@@ -401,7 +399,9 @@ Common::Quaternion GetRotationFromAcceleration(const Common::Vec3& accel)
 
 Common::Quaternion GetRotationFromGyroscope(const Common::Vec3& gyro)
 {
-  return Common::Quaternion{1, gyro.x / 2, gyro.y / 2, gyro.z / 2};
+  const auto length = gyro.Length();
+  return (length != 0) ? Common::Quaternion::Rotate(length, gyro / length) :
+                         Common::Quaternion::Identity();
 }
 
 Common::Matrix33 GetRotationalMatrix(const Common::Vec3& angle)

@@ -1,6 +1,5 @@
 // Copyright 2015 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
@@ -14,10 +13,7 @@ class ScopeGuard final
 public:
   ScopeGuard(Callable&& finalizer) : m_finalizer(std::forward<Callable>(finalizer)) {}
 
-  ScopeGuard(ScopeGuard&& other) : m_finalizer(std::move(other.m_finalizer))
-  {
-    other.m_finalizer = nullptr;
-  }
+  ScopeGuard(ScopeGuard&& other) : m_finalizer(std::move(other.m_finalizer)) { other.Dismiss(); }
 
   ~ScopeGuard() { Exit(); }
   void Dismiss() { m_finalizer.reset(); }

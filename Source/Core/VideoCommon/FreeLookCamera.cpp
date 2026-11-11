@@ -1,21 +1,15 @@
 // Copyright 2020 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoCommon/FreeLookCamera.h"
 
 #include <algorithm>
-#include <math.h>
 
 #include <fmt/format.h>
 
-#include "Common/MathUtil.h"
-
 #include "Common/ChunkFile.h"
-#include "Core/ConfigManager.h"
+#include "Common/Config/Config.h"
 #include "Core/Core.h"
-
-#include "VideoCommon/VideoCommon.h"
 
 FreeLookCamera g_freelook_camera;
 
@@ -36,12 +30,12 @@ std::string to_string(FreeLook::ControlType type)
   return "";
 }
 
-class SixAxisController final : public CameraController
+class SixAxisController final : public CameraControllerInput
 {
 public:
   SixAxisController() = default;
 
-  Common::Matrix44 GetView() override { return m_mat; }
+  Common::Matrix44 GetView() const override { return m_mat; }
 
   void MoveVertical(float amt) override
   {
@@ -65,18 +59,26 @@ public:
     m_mat = Common::Matrix44::FromQuaternion(quat) * m_mat;
   }
 
-  void Reset() override { m_mat = Common::Matrix44::Identity(); }
+  void Reset() override
+  {
+    CameraControllerInput::Reset();
+    m_mat = Common::Matrix44::Identity();
+  }
 
-  void DoState(PointerWrap& p) { p.Do(m_mat); }
+  void DoState(PointerWrap& p) override
+  {
+    CameraControllerInput::DoState(p);
+    p.Do(m_mat);
+  }
 
 private:
   Common::Matrix44 m_mat = Common::Matrix44::Identity();
 };
 
-class FPSController final : public CameraController
+class FPSController final : public CameraControllerInput
 {
 public:
-  Common::Matrix44 GetView() override
+  Common::Matrix44 GetView() const override
   {
     return Common::Matrix44::FromQuaternion(m_rotate_quat) *
            Common::Matrix44::Translate(m_position);
@@ -102,25 +104,32 @@ public:
 
   void Rotate(const Common::Vec3& amt) override
   {
+    if (amt.Length() == 0)
+      return;
+
     m_rotation += amt;
 
     using Common::Quaternion;
-    const auto quat =
+    m_rotate_quat =
         (Quaternion::RotateX(m_rotation.x) * Quaternion::RotateY(m_rotation.y)).Normalized();
-    Rotate(quat);
   }
 
-  void Rotate(const Common::Quaternion& quat) override { m_rotate_quat = quat; }
+  void Rotate(const Common::Quaternion& quat) override
+  {
+    Rotate(Common::FromQuaternionToEuler(quat));
+  }
 
   void Reset() override
   {
+    CameraControllerInput::Reset();
     m_position = Common::Vec3{};
     m_rotation = Common::Vec3{};
     m_rotate_quat = Common::Quaternion::Identity();
   }
 
-  void DoState(PointerWrap& p)
+  void DoState(PointerWrap& p) override
   {
+    CameraControllerInput::DoState(p);
     p.Do(m_rotation);
     p.Do(m_rotate_quat);
     p.Do(m_position);
@@ -132,10 +141,10 @@ private:
   Common::Vec3 m_position = Common::Vec3{};
 };
 
-class OrbitalController final : public CameraController
+class OrbitalController final : public CameraControllerInput
 {
 public:
-  Common::Matrix44 GetView() override
+  Common::Matrix44 GetView() const override
   {
     return Common::Matrix44::Translate(Common::Vec3{0, 0, -m_distance}) *
            Common::Matrix44::FromQuaternion(m_rotate_quat);
@@ -148,59 +157,116 @@ public:
   void MoveForward(float amt) override
   {
     m_distance += -1 * amt;
-    m_distance = std::clamp(m_distance, 0.0f, m_distance);
+    m_distance = std::max(m_distance, MIN_DISTANCE);
   }
 
   void Rotate(const Common::Vec3& amt) override
   {
+    if (amt.Length() == 0)
+      return;
+
     m_rotation += amt;
 
     using Common::Quaternion;
-    const auto quat =
+    m_rotate_quat =
         (Quaternion::RotateX(m_rotation.x) * Quaternion::RotateY(m_rotation.y)).Normalized();
-    Rotate(quat);
   }
 
-  void Rotate(const Common::Quaternion& quat) override { m_rotate_quat = quat; }
+  void Rotate(const Common::Quaternion& quat) override
+  {
+    Rotate(Common::FromQuaternionToEuler(quat));
+  }
 
   void Reset() override
   {
+    CameraControllerInput::Reset();
     m_rotation = Common::Vec3{};
     m_rotate_quat = Common::Quaternion::Identity();
-    m_distance = 0;
+    m_distance = MIN_DISTANCE;
   }
 
-  void DoState(PointerWrap& p)
+  void DoState(PointerWrap& p) override
   {
+    CameraControllerInput::DoState(p);
     p.Do(m_rotation);
     p.Do(m_rotate_quat);
     p.Do(m_distance);
   }
 
 private:
-  float m_distance = 0;
+  static constexpr float MIN_DISTANCE = 0.0f;
+  float m_distance = MIN_DISTANCE;
   Common::Vec3 m_rotation = Common::Vec3{};
   Common::Quaternion m_rotate_quat = Common::Quaternion::Identity();
 };
 }  // namespace
 
-FreeLookCamera::FreeLookCamera()
+Common::Vec2 CameraControllerInput::GetFieldOfViewMultiplier() const
 {
-  SetControlType(FreeLook::ControlType::SixAxis);
+  return Common::Vec2{m_fov_x_multiplier, m_fov_y_multiplier};
 }
 
-void FreeLookCamera::SetControlType(FreeLook::ControlType type)
+void CameraControllerInput::DoState(PointerWrap& p)
 {
-  if (m_current_type && *m_current_type == type)
-  {
-    return;
-  }
+  p.Do(m_speed);
+  p.Do(m_fov_x_multiplier);
+  p.Do(m_fov_y_multiplier);
+}
 
-  if (type == FreeLook::ControlType::SixAxis)
-  {
-    m_camera_controller = std::make_unique<SixAxisController>();
-  }
-  else if (type == FreeLook::ControlType::Orbital)
+void CameraControllerInput::IncreaseFovX(float fov)
+{
+  m_fov_x_multiplier += fov;
+  m_fov_x_multiplier = std::max(m_fov_x_multiplier, MIN_FOV_MULTIPLIER);
+}
+
+void CameraControllerInput::IncreaseFovY(float fov)
+{
+  m_fov_y_multiplier += fov;
+  m_fov_y_multiplier = std::max(m_fov_y_multiplier, MIN_FOV_MULTIPLIER);
+}
+
+float CameraControllerInput::GetFovStepSize() const
+{
+  return 1.5f;
+}
+
+void CameraControllerInput::Reset()
+{
+  m_fov_x_multiplier = DEFAULT_FOV_MULTIPLIER;
+  m_fov_y_multiplier = DEFAULT_FOV_MULTIPLIER;
+  m_dirty = true;
+}
+
+void CameraControllerInput::ModifySpeed(float amt)
+{
+  m_speed += amt;
+  m_speed = std::max(m_speed, 0.0f);
+}
+
+void CameraControllerInput::ResetSpeed()
+{
+  m_speed = DEFAULT_SPEED;
+}
+
+float CameraControllerInput::GetSpeed() const
+{
+  return m_speed;
+}
+
+FreeLookCamera::FreeLookCamera()
+{
+  RefreshConfig();
+}
+
+void FreeLookCamera::RefreshConfig()
+{
+  m_is_enabled = Config::Get(Config::FREE_LOOK_ENABLED);
+  const auto type = Config::Get(Config::FL1_CONTROL_TYPE);
+
+  if (m_current_type == type)
+    return;
+
+  if (type == FreeLook::ControlType::Orbital)
   {
     m_camera_controller = std::make_unique<OrbitalController>();
   }
@@ -208,92 +274,29 @@ void FreeLookCamera::SetControlType(FreeLook::ControlType type)
   {
     m_camera_controller = std::make_unique<FPSController>();
   }
+  else
+  {
+    m_camera_controller = std::make_unique<SixAxisController>();
+  }
 
   m_current_type = type;
 }
 
-Common::Matrix44 FreeLookCamera::GetView()
+Common::Matrix44 FreeLookCamera::GetView() const
 {
   return m_camera_controller->GetView();
 }
 
-Common::Vec2 FreeLookCamera::GetFieldOfView() const
+Common::Vec2 FreeLookCamera::GetFieldOfViewMultiplier() const
 {
-  return Common::Vec2{m_fov_x, m_fov_y};
-}
-
-void FreeLookCamera::MoveVertical(float amt)
-{
-  m_camera_controller->MoveVertical(amt);
-  m_dirty = true;
-}
-
-void FreeLookCamera::MoveHorizontal(float amt)
-{
-  m_camera_controller->MoveHorizontal(amt);
-  m_dirty = true;
-}
-
-void FreeLookCamera::MoveForward(float amt)
-{
-  m_camera_controller->MoveForward(amt);
-  m_dirty = true;
-}
-
-void FreeLookCamera::Rotate(const Common::Vec3& amt)
-{
-  m_camera_controller->Rotate(amt);
-  m_dirty = true;
-}
-
-void FreeLookCamera::IncreaseFovX(float fov)
-{
-  m_fov_x += fov;
-  m_fov_x = std::clamp(m_fov_x, m_fov_step_size, m_fov_x);
-}
-
-void FreeLookCamera::IncreaseFovY(float fov)
-{
-  m_fov_y += fov;
-  m_fov_y = std::clamp(m_fov_y, m_fov_step_size, m_fov_y);
-}
-
-float FreeLookCamera::GetFovStepSize() const
-{
-  return m_fov_step_size;
-}
-
-void FreeLookCamera::Reset()
-{
-  m_camera_controller->Reset();
-  m_fov_x = 1.0f;
-  m_fov_y = 1.0f;
-  m_dirty = true;
-}
-
-void FreeLookCamera::ModifySpeed(float multiplier)
-{
-  m_speed *= multiplier;
-}
-
-void FreeLookCamera::ResetSpeed()
-{
-  m_speed = 1.0f;
-}
-
-float FreeLookCamera::GetSpeed() const
-{
-  return m_speed;
+  return m_camera_controller->GetFieldOfViewMultiplier();
 }
 
 void FreeLookCamera::DoState(PointerWrap& p)
 {
-  if (p.mode == PointerWrap::MODE_WRITE || p.mode == PointerWrap::MODE_MEASURE)
+  if (p.IsWriteMode() || p.IsMeasureMode())
   {
-    p.Do(m_speed);
     p.Do(m_current_type);
-    p.Do(m_fov_x);
-    p.Do(m_fov_y);
     if (m_camera_controller)
     {
       m_camera_controller->DoState(p);
@@ -302,15 +305,12 @@ void FreeLookCamera::DoState(PointerWrap& p)
   else
   {
     const auto old_type = m_current_type;
-    p.Do(m_speed);
     p.Do(m_current_type);
-    p.Do(m_fov_x);
-    p.Do(m_fov_y);
     if (old_type == m_current_type)
     {
       m_camera_controller->DoState(p);
     }
-    else if (p.GetMode() == PointerWrap::MODE_READ)
+    else if (p.IsReadMode())
     {
       const std::string old_type_name = old_type ? to_string(*old_type) : "";
       const std::string loaded_type_name = m_current_type ? to_string(*m_current_type) : "";
@@ -319,22 +319,17 @@ void FreeLookCamera::DoState(PointerWrap& p)
                       "'{}'.  Aborting load state",
                       old_type_name, loaded_type_name);
       Core::DisplayMessage(message, 5000);
-      p.SetMode(PointerWrap::MODE_VERIFY);
+      p.SetVerifyMode();
     }
   }
 }
 
-bool FreeLookCamera::IsDirty() const
-{
-  return m_dirty;
-}
-
-void FreeLookCamera::SetClean()
-{
-  m_dirty = false;
-}
-
 bool FreeLookCamera::IsActive() const
 {
-  return FreeLook::GetActiveConfig().enabled;
+  return m_is_enabled;
+}
+
+CameraController* FreeLookCamera::GetController() const
+{
+  return m_camera_controller.get();
 }

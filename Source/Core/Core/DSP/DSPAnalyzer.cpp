@@ -1,6 +1,5 @@
 // Copyright 2009 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "Core/DSP/DSPAnalyzer.h"
 
@@ -92,7 +91,9 @@ void Analyzer::FindInstructionStarts(const SDSP& dsp, u16 start_addr, u16 end_ad
 {
   // This may not be 100% accurate in case of jump tables!
   // It could get desynced, which would be bad. We'll see if that's an issue.
+#ifndef DISABLE_UPDATE_SR_ANALYSIS
   u16 last_arithmetic = 0;
+#endif
   for (u16 addr = start_addr; addr < end_addr;)
   {
     const UDSPInstruction inst = dsp.ReadIMEM(addr);
@@ -118,6 +119,7 @@ void Analyzer::FindInstructionStarts(const SDSP& dsp, u16 start_addr, u16 end_ad
       m_code_flags[static_cast<u16>(addr + 1u)] |= CODE_LOOP_END;
     }
 
+#ifndef DISABLE_UPDATE_SR_ANALYSIS
     // Mark the last arithmetic/multiplier instruction before a branch.
     // We must update the SR reg at these instructions
     if (opcode->updates_sr)
@@ -129,12 +131,15 @@ void Analyzer::FindInstructionStarts(const SDSP& dsp, u16 start_addr, u16 end_ad
     {
       m_code_flags[last_arithmetic] |= CODE_UPDATE_SR;
     }
+#endif
 
     // If an instruction potentially raises exceptions, mark the following
     // instruction as needing to check for exceptions
-    if (opcode->opcode == 0x00c0 || opcode->opcode == 0x1800 || opcode->opcode == 0x1880 ||
-        opcode->opcode == 0x1900 || opcode->opcode == 0x1980 || opcode->opcode == 0x2000 ||
-        opcode->extended)
+    if (opcode->opcode == 0x00c0 || opcode->opcode == 0x00e0 || opcode->opcode == 0x1600 ||
+        opcode->opcode == 0x1800 || opcode->opcode == 0x1880 || opcode->opcode == 0x1900 ||
+        opcode->opcode == 0x1980 || opcode->opcode == 0x1a00 || opcode->opcode == 0x1a80 ||
+        opcode->opcode == 0x1b00 || opcode->opcode == 0x1b80 || opcode->opcode == 0x2000 ||
+        opcode->opcode == 0x2800 || opcode->opcode == 0x2c00 || opcode->extended)
     {
       m_code_flags[static_cast<u16>(addr + opcode->size)] |= CODE_CHECK_EXC;
     }

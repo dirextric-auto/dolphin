@@ -1,11 +1,11 @@
 // Copyright 2016 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+#include "DolphinQt/Config/InfoWidget.h"
 
 #include <QComboBox>
 #include <QCryptographicHash>
 #include <QDir>
-#include <QFileDialog>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
@@ -15,16 +15,19 @@
 
 #include "Core/ConfigManager.h"
 
-#include "DiscIO/Blob.h"
 #include "DiscIO/Enums.h"
+#include "DiscIO/Volume.h"
+#include "DiscIO/WiiSaveBanner.h"
 
-#include "DolphinQt/Config/InfoWidget.h"
+#include "DolphinQt/QtUtils/DolphinFileDialog.h"
 #include "DolphinQt/QtUtils/ImageConverter.h"
 
 #include "UICommon/UICommon.h"
 
 InfoWidget::InfoWidget(const UICommon::GameFile& game) : m_game(game)
 {
+  m_volume = DiscIO::CreateVolume(m_game.GetFilePath());
+
   QVBoxLayout* layout = new QVBoxLayout();
 
   layout->addWidget(CreateFileDetails());
@@ -33,8 +36,12 @@ InfoWidget::InfoWidget(const UICommon::GameFile& game) : m_game(game)
   if (!game.GetLanguages().empty())
     layout->addWidget(CreateBannerDetails());
 
+  layout->addStretch(1);
+
   setLayout(layout);
 }
+
+InfoWidget::~InfoWidget() = default;
 
 QGroupBox* InfoWidget::CreateFileDetails()
 {
@@ -87,6 +94,7 @@ QGroupBox* InfoWidget::CreateGameDetails()
   const QString game_name = QString::fromStdString(m_game.GetInternalName());
 
   bool is_disc_based = m_game.GetPlatform() == DiscIO::Platform::GameCubeDisc ||
+                       m_game.GetPlatform() == DiscIO::Platform::Triforce ||
                        m_game.GetPlatform() == DiscIO::Platform::WiiDisc;
 
   QLineEdit* internal_name =
@@ -120,6 +128,17 @@ QGroupBox* InfoWidget::CreateGameDetails()
 
   if (!m_game.GetApploaderDate().empty())
     layout->addRow(tr("Apploader Date:"), CreateValueDisplay(m_game.GetApploaderDate()));
+
+  if (m_volume)
+  {
+    const DiscIO::Partition partition = m_volume->GetGamePartition();
+    const IOS::ES::TMDReader& tmd = m_volume->GetTMD(partition);
+    if (tmd.IsValid())
+    {
+      const auto ios = fmt::format("IOS{}", static_cast<u32>(tmd.GetIOSId()));
+      layout->addRow(tr("IOS Version:"), CreateValueDisplay(ios));
+    }
+  }
 
   group->setLayout(layout);
   return group;
@@ -163,7 +182,9 @@ QWidget* InfoWidget::CreateBannerGraphic(const QPixmap& image)
   QHBoxLayout* layout = new QHBoxLayout();
 
   QLabel* banner = new QLabel();
-  banner->setPixmap(image);
+  banner->setPixmap(image.scaled(image.size().boundedTo(
+      QSize{DiscIO::WiiSaveBanner::BANNER_WIDTH, DiscIO::WiiSaveBanner::BANNER_HEIGHT})));
+
   QPushButton* save = new QPushButton(tr("Save as..."));
   connect(save, &QPushButton::clicked, this, &InfoWidget::SaveBanner);
 
@@ -175,8 +196,8 @@ QWidget* InfoWidget::CreateBannerGraphic(const QPixmap& image)
 
 void InfoWidget::SaveBanner()
 {
-  QString path = QFileDialog::getSaveFileName(this, tr("Select a File"), QDir::currentPath(),
-                                              tr("PNG image file (*.png);; All Files (*)"));
+  QString path = DolphinFileDialog::getSaveFileName(this, tr("Select a File"), QDir::currentPath(),
+                                                    tr("PNG image file (*.png);; All Files (*)"));
   ToQPixmap(m_game.GetBannerImage()).save(path, "PNG");
 }
 
@@ -209,8 +230,7 @@ void InfoWidget::CreateLanguageSelector()
   if (m_language_selector->count() == 1)
     m_language_selector->setDisabled(true);
 
-  connect(m_language_selector, qOverload<int>(&QComboBox::currentIndexChanged), this,
-          &InfoWidget::ChangeLanguage);
+  connect(m_language_selector, &QComboBox::currentIndexChanged, this, &InfoWidget::ChangeLanguage);
 }
 
 void InfoWidget::ChangeLanguage()

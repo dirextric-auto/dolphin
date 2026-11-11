@@ -1,20 +1,16 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoBackends/OGL/OGLVertexManager.h"
 
-#include <fstream>
 #include <memory>
-#include <string>
-#include <vector>
 
 #include "Common/Align.h"
 #include "Common/CommonTypes.h"
 #include "Common/GL/GLExtensions/GLExtensions.h"
+#include "Common/GL/GLUtil.h"
 
-#include "VideoBackends/OGL/OGLPipeline.h"
-#include "VideoBackends/OGL/OGLRender.h"
+#include "VideoBackends/OGL/OGLGfx.h"
 #include "VideoBackends/OGL/OGLStreamBuffer.h"
 #include "VideoBackends/OGL/ProgramShaderCache.h"
 
@@ -39,7 +35,7 @@ VertexManager::VertexManager() = default;
 
 VertexManager::~VertexManager()
 {
-  if (g_ActiveConfig.backend_info.bSupportsPaletteConversion)
+  if (g_backend_info.bSupportsPaletteConversion)
   {
     glDeleteTextures(static_cast<GLsizei>(m_texel_buffer_views.size()),
                      m_texel_buffer_views.data());
@@ -59,8 +55,12 @@ bool VertexManager::Initialize()
 
   m_vertex_buffer = StreamBuffer::Create(GL_ARRAY_BUFFER, VERTEX_STREAM_BUFFER_SIZE);
   m_index_buffer = StreamBuffer::Create(GL_ELEMENT_ARRAY_BUFFER, INDEX_STREAM_BUFFER_SIZE);
+  if (g_ActiveConfig.UseVSForLinePointExpand() || g_backend_info.bSupportsDynamicVertexLoader)
+  {
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 1, m_vertex_buffer->GetGLBufferId());
+  }
 
-  if (g_ActiveConfig.backend_info.bSupportsPaletteConversion)
+  if (g_backend_info.bSupportsPaletteConversion)
   {
     // The minimum MAX_TEXTURE_BUFFER_SIZE that the spec mandates is 65KB, we are asking for a 1MB
     // buffer here. This buffer is also used as storage for undecoded textures when compute shader
@@ -112,7 +112,7 @@ bool VertexManager::UploadTexelBuffer(const void* data, u32 data_size, TexelBuff
   // Bind the correct view to the texel buffer slot.
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_BUFFER, m_texel_buffer_views[static_cast<u32>(format)]);
-  Renderer::GetInstance()->InvalidateTextureBinding(0);
+  GetOGLGfx()->InvalidateTextureBinding(0);
   return true;
 }
 
@@ -137,11 +137,11 @@ bool VertexManager::UploadTexelBuffer(const void* data, u32 data_size, TexelBuff
 
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_BUFFER, m_texel_buffer_views[static_cast<u32>(format)]);
-  Renderer::GetInstance()->InvalidateTextureBinding(0);
+  GetOGLGfx()->InvalidateTextureBinding(0);
 
   glActiveTexture(GL_TEXTURE1);
   glBindTexture(GL_TEXTURE_BUFFER, m_texel_buffer_views[static_cast<u32>(palette_format)]);
-  Renderer::GetInstance()->InvalidateTextureBinding(1);
+  GetOGLGfx()->InvalidateTextureBinding(1);
 
   return true;
 }
@@ -177,12 +177,16 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
   *out_base_vertex = vertex_stride > 0 ? (m_vertex_buffer->GetCurrentOffset() / vertex_stride) : 0;
   *out_base_index = m_index_buffer->GetCurrentOffset() / sizeof(u16);
 
-  CheckBufferBinding();
   m_vertex_buffer->Unmap(vertex_data_size);
   m_index_buffer->Unmap(index_data_size);
 
   ADDSTAT(g_stats.this_frame.bytes_vertex_streamed, vertex_data_size);
   ADDSTAT(g_stats.this_frame.bytes_index_streamed, index_data_size);
+}
+
+void VertexManager::BindCommittedBuffer(u32 /*vertex_stride*/)
+{
+  CheckBufferBinding();
 }
 
 void VertexManager::UploadUniforms()

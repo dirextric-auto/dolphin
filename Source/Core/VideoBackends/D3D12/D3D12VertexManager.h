@@ -1,10 +1,10 @@
 // Copyright 2019 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
 #include <memory>
+
 #include "VideoBackends/D3D12/D3D12StreamBuffer.h"
 #include "VideoBackends/D3D12/DescriptorHeapManager.h"
 #include "VideoCommon/VertexManagerBase.h"
@@ -15,7 +15,7 @@ class VertexManager final : public VertexManagerBase
 {
 public:
   VertexManager();
-  ~VertexManager();
+  ~VertexManager() override;
 
   bool Initialize() override;
 
@@ -30,11 +30,13 @@ protected:
   void ResetBuffer(u32 vertex_stride) override;
   void CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_indices, u32* out_base_vertex,
                     u32* out_base_index) override;
+  void BindCommittedBuffer(u32 vertex_stride) override;
   void UploadUniforms() override;
 
   void UpdateVertexShaderConstants();
   void UpdateGeometryShaderConstants();
   void UpdatePixelShaderConstants();
+  void UpdateCustomShaderConstants();
 
   // Allocates storage in the uniform buffer of the specified size. If this storage cannot be
   // allocated immediately, the current command buffer will be submitted and all stage's
@@ -47,6 +49,7 @@ protected:
   StreamBuffer m_uniform_stream_buffer;
   StreamBuffer m_texel_stream_buffer;
   std::array<DescriptorHandle, NUM_TEXEL_BUFFER_FORMATS> m_texel_buffer_views = {};
+  DescriptorHandle m_vertex_srv = {};
 };
 
 }  // namespace DX12

@@ -1,6 +1,5 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
@@ -8,6 +7,7 @@
 #include <string>
 
 #include "Common/CommonTypes.h"
+#include "Common/EnumFormatter.h"
 #include "Common/Flag.h"
 #include "Common/Network.h"
 #include "Common/Swap.h"
@@ -37,9 +37,9 @@ constexpr bool IsValidMode(Mode mode)
 }
 }  // namespace IOS::HLE::WD
 
-namespace IOS::HLE::Device
+namespace IOS::HLE
 {
-class NetWDCommand : public Device
+class NetWDCommandDevice : public EmulationDevice
 {
 public:
   enum class ResultCode : u32
@@ -50,11 +50,11 @@ public:
     DriverError = 0x80008003,
   };
 
-  NetWDCommand(Kernel& ios, const std::string& device_name);
+  NetWDCommandDevice(EmulationKernel& ios, const std::string& device_name);
 
-  IPCCommandResult Open(const OpenRequest& request) override;
-  IPCCommandResult Close(u32 fd) override;
-  IPCCommandResult IOCtlV(const IOCtlVRequest& request) override;
+  std::optional<IPCReply> Open(const OpenRequest& request) override;
+  std::optional<IPCReply> Close(u32 fd) override;
+  std::optional<IPCReply> IOCtlV(const IOCtlVRequest& request) override;
   void Update() override;
   bool IsOpened() const override { return true; }
   void DoState(PointerWrap& p) override;
@@ -148,15 +148,16 @@ private:
     ScanningForAOSSAccessPoint,
     ScanningForDS,
   };
+  friend struct fmt::formatter<IOS::HLE::NetWDCommandDevice::Status>;
 
   void ProcessRecvRequests();
   void HandleStateChange();
   static Status GetTargetStatusForMode(WD::Mode mode);
 
-  IPCCommandResult SetLinkState(const IOCtlVRequest& request);
-  IPCCommandResult GetLinkState(const IOCtlVRequest& request) const;
-  IPCCommandResult Disassociate(const IOCtlVRequest& request);
-  IPCCommandResult GetInfo(const IOCtlVRequest& request) const;
+  IPCReply SetLinkState(const IOCtlVRequest& request);
+  IPCReply GetLinkState(const IOCtlVRequest& request) const;
+  IPCReply Disassociate(const IOCtlVRequest& request);
+  IPCReply GetInfo(const IOCtlVRequest& request) const;
 
   s32 m_ipc_owner_fd = -1;
   WD::Mode m_mode = WD::Mode::NotInitialized;
@@ -172,4 +173,21 @@ private:
   std::deque<u32> m_recv_frame_requests;
   std::deque<u32> m_recv_notification_requests;
 };
-}  // namespace IOS::HLE::Device
+}  // namespace IOS::HLE
+
+template <>
+struct fmt::formatter<IOS::HLE::WD::Mode> : EnumFormatter<IOS::HLE::WD::Mode::Unknown6>
+{
+  static constexpr array_type names{
+      "Not initialized", "DS Communications", "Unknown 2", "AOSS Access Point Scan",
+      "Unknown 4",       "Unknown 5",         "Unknown 6",
+  };
+  constexpr formatter() : EnumFormatter(names) {}
+};
+template <>
+struct fmt::formatter<IOS::HLE::NetWDCommandDevice::Status>
+    : EnumFormatter<IOS::HLE::NetWDCommandDevice::Status::ScanningForDS>
+{
+  static constexpr array_type names{"Idle", "Scanning for AOSS Access Point", "Scanning for DS"};
+  constexpr formatter() : EnumFormatter(names) {}
+};

@@ -1,10 +1,8 @@
 // Copyright 2008 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "DiscIO/VolumeGC.h"
 
-#include <cstddef>
 #include <map>
 #include <memory>
 #include <optional>
@@ -12,17 +10,15 @@
 #include <utility>
 #include <vector>
 
-#include <mbedtls/sha1.h>
-
 #include "Common/Assert.h"
 #include "Common/ColorUtil.h"
 #include "Common/CommonTypes.h"
+#include "Common/Crypto/SHA1.h"
 #include "Common/Logging/Log.h"
-#include "Common/MsgHandler.h"
-#include "Common/StringUtil.h"
 
 #include "DiscIO/Blob.h"
 #include "DiscIO/DiscExtractor.h"
+#include "DiscIO/DiscUtils.h"
 #include "DiscIO/Enums.h"
 #include "DiscIO/FileSystemGCWii.h"
 #include "DiscIO/Filesystem.h"
@@ -30,7 +26,8 @@
 
 namespace DiscIO
 {
-VolumeGC::VolumeGC(std::unique_ptr<BlobReader> reader) : m_reader(std::move(reader))
+VolumeGC::VolumeGC(std::unique_ptr<BlobReader> reader)
+    : m_reader(std::move(reader)), m_is_triforce(false)
 {
   ASSERT(m_reader);
 
@@ -40,11 +37,24 @@ VolumeGC::VolumeGC(std::unique_ptr<BlobReader> reader) : m_reader(std::move(read
   };
 
   m_converted_banner = [this] { return LoadBannerFile(); };
+
+  constexpr u32 BTID_MAGIC = 0x44495442;
+  auto tmp_fs = GetFileSystem(PARTITION_NONE);
+  if (tmp_fs)
+  {
+    std::unique_ptr<FileInfo> file_info = tmp_fs->FindFileInfo("boot.id");
+    if (!file_info)
+      return;
+    const u64 file_size = ReadFile(*this, PARTITION_NONE, file_info.get(),
+                                   reinterpret_cast<u8*>(&m_triforce_header), sizeof(BootID));
+    if (file_size >= 4 && m_triforce_header.magic == BTID_MAGIC)
+    {
+      m_is_triforce = true;
+    }
+  }
 }
 
-VolumeGC::~VolumeGC()
-{
-}
+VolumeGC::~VolumeGC() = default;
 
 bool VolumeGC::Read(u64 offset, u64 length, u8* buffer, const Partition& partition) const
 {
@@ -61,14 +71,40 @@ const FileSystem* VolumeGC::GetFileSystem(const Partition& partition) const
 
 std::string VolumeGC::GetGameTDBID(const Partition& partition) const
 {
-  const std::string game_id = GetGameID(partition);
+  // Datel discs for the GameCube can have one of two different game IDs:
+  //
+  // 1: GNHE5d. (Yes, with a lowercase d.) This game ID is used not only for
+  // all kinds of Datel discs, but also for the licensed release NHL Hitz 2002.
+  //
+  // 2: DTLX01. This game ID is used for a few late Datel releases. Both Action Replay
+  // and FreeLoader are known to have been released under this game ID.
+  //
+  // Since no game ID used for Datel discs uniquely represents one product,
+  // never use the game ID of a Datel disc for looking up the title or cover art.
+  if (IsDatelDisc())
+    return "";
 
-  // Don't return an ID for Datel discs that are using the game ID of NHL Hitz 2002
-  return game_id == "GNHE5d" && IsDatelDisc() ? "" : game_id;
+  // Normal case. Just return the usual game ID.
+  return GetGameID(partition);
 }
 
 Region VolumeGC::GetRegion() const
 {
+  if (m_is_triforce)
+  {
+    switch (m_triforce_header.region_flags & 0x000000FF)
+    {
+    default:
+    case 0x02:  // JAPAN
+    case 0x08:  // ASIA
+      return Region::NTSC_J;
+    case 0x0E:  // USA
+      return Region::NTSC_U;
+    case 0x0C:  // EXPORT
+      return Region::PAL;
+    }
+  }
+
   return RegionCodeToRegion(m_reader->ReadSwapped<u32>(0x458));
 }
 
@@ -109,14 +145,14 @@ BlobType VolumeGC::GetBlobType() const
   return m_reader->GetBlobType();
 }
 
-u64 VolumeGC::GetSize() const
+u64 VolumeGC::GetDataSize() const
 {
   return m_reader->GetDataSize();
 }
 
-bool VolumeGC::IsSizeAccurate() const
+DataSizeType VolumeGC::GetDataSizeType() const
 {
-  return m_reader->IsDataSizeAccurate();
+  return m_reader->GetDataSizeType();
 }
 
 u64 VolumeGC::GetRawSize() const
@@ -131,29 +167,34 @@ const BlobReader& VolumeGC::GetBlobReader() const
 
 Platform VolumeGC::GetVolumeType() const
 {
-  return Platform::GameCubeDisc;
+  if (m_is_triforce)
+    return Platform::Triforce;
+  else
+    return Platform::GameCubeDisc;
 }
 
 bool VolumeGC::IsDatelDisc() const
 {
-  return !GetBootDOLOffset(*this, PARTITION_NONE).has_value();
+  return GetGameID() == "DTLX01" || !GetBootDOLOffset(*this, PARTITION_NONE).has_value();
 }
 
 std::array<u8, 20> VolumeGC::GetSyncHash() const
 {
-  mbedtls_sha1_context context;
-  mbedtls_sha1_init(&context);
-  mbedtls_sha1_starts_ret(&context);
+  auto context = Common::SHA1::CreateContext();
 
-  AddGamePartitionToSyncHash(&context);
+  AddGamePartitionToSyncHash(context.get());
 
-  std::array<u8, 20> hash;
-  mbedtls_sha1_finish_ret(&context, hash.data());
-  return hash;
+  return context->Finish();
 }
 
 VolumeGC::ConvertedGCBanner VolumeGC::LoadBannerFile() const
 {
+  // There is at least one Triforce game that has an opening.bnr file but from a different game.
+  if (m_is_triforce)
+  {
+    return {};
+  }
+
   GCBanner banner_file;
   const u64 file_size = ReadFile(*this, PARTITION_NONE, "opening.bnr",
                                  reinterpret_cast<u8*>(&banner_file), sizeof(GCBanner));

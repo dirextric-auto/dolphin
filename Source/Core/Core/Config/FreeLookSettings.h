@@ -1,14 +1,18 @@
 // Copyright 2020 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #pragma once
 
-#include "Common/Config/Config.h"
+#include "Common/Config/ConfigInfo.h"
 
 namespace FreeLook
 {
-enum class ControlType : int;
+enum class ControlType : int
+{
+  SixAxis,
+  FPS,
+  Orbital
+};
 }
 
 namespace Config
@@ -16,6 +20,7 @@ namespace Config
 // Configuration Information
 
 extern const Info<bool> FREE_LOOK_ENABLED;
+extern const Info<bool> FREE_LOOK_BACKGROUND_INPUT;
 
 // FreeLook.Controller1
 extern const Info<FreeLook::ControlType> FL1_CONTROL_TYPE;

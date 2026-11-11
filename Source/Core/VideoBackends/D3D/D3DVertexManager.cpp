@@ -1,18 +1,19 @@
 // Copyright 2010 Dolphin Emulator Project
-// Licensed under GPLv2+
-// Refer to the license.txt file included.
+// SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "VideoBackends/D3D/D3DVertexManager.h"
 
-#include <d3d11.h>
+#include <d3d11_4.h>
 
 #include "Common/Align.h"
 #include "Common/Assert.h"
 #include "Common/CommonTypes.h"
 
+#include "Core/System.h"
+
 #include "VideoBackends/D3D/D3DBase.h"
 #include "VideoBackends/D3D/D3DBoundingBox.h"
-#include "VideoBackends/D3D/D3DRender.h"
+#include "VideoBackends/D3D/D3DGfx.h"
 #include "VideoBackends/D3D/D3DState.h"
 #include "VideoBackends/D3DCommon/D3DCommon.h"
 
@@ -35,7 +36,8 @@ static ComPtr<ID3D11Buffer> AllocateConstantBuffer(u32 size)
                                   D3D11_CPU_ACCESS_WRITE);
   ComPtr<ID3D11Buffer> cbuf;
   const HRESULT hr = D3D::device->CreateBuffer(&cbdesc, nullptr, &cbuf);
-  CHECK(SUCCEEDED(hr), "shader constant buffer (size=%u)", cbsize);
+  ASSERT_MSG(VIDEO, SUCCEEDED(hr), "Failed to create shader constant buffer (size={}): {}", cbsize,
+             DX11HRWrap(hr));
   if (FAILED(hr))
     return nullptr;
 
@@ -60,8 +62,8 @@ CreateTexelBufferView(ID3D11Buffer* buffer, TexelBufferFormat format, DXGI_FORMA
   CD3D11_SHADER_RESOURCE_VIEW_DESC srv_desc(buffer, srv_format, 0,
                                             VertexManager::TEXEL_STREAM_BUFFER_SIZE /
                                                 VertexManager::GetTexelBufferElementSize(format));
-  CHECK(SUCCEEDED(D3D::device->CreateShaderResourceView(buffer, &srv_desc, &srv)),
-        "Create SRV for texel buffer");
+  HRESULT hr = D3D::device->CreateShaderResourceView(buffer, &srv_desc, &srv);
+  ASSERT_MSG(VIDEO, SUCCEEDED(hr), "Failed to create SRV for texel buffer: {}", DX11HRWrap(hr));
   return srv;
 }
 
@@ -78,12 +80,12 @@ bool VertexManager::Initialize()
                              D3D11_BIND_INDEX_BUFFER | D3D11_BIND_VERTEX_BUFFER,
                              D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
 
-  for (int i = 0; i < BUFFER_COUNT; i++)
+  for (auto& buffer : m_buffers)
   {
-    CHECK(SUCCEEDED(D3D::device->CreateBuffer(&bufdesc, nullptr, &m_buffers[i])),
-          "Failed to create buffer.");
-    if (m_buffers[i])
-      D3DCommon::SetDebugObjectName(m_buffers[i].Get(), "Buffer of VertexManager");
+    HRESULT hr = D3D::device->CreateBuffer(&bufdesc, nullptr, &buffer);
+    ASSERT_MSG(VIDEO, SUCCEEDED(hr), "Failed to create buffer: {}", DX11HRWrap(hr));
+    if (buffer)
+      D3DCommon::SetDebugObjectName(buffer.Get(), "Buffer of VertexManager");
   }
 
   m_vertex_constant_buffer = AllocateConstantBuffer(sizeof(VertexShaderConstants));
@@ -94,8 +96,8 @@ bool VertexManager::Initialize()
 
   CD3D11_BUFFER_DESC texel_buf_desc(TEXEL_STREAM_BUFFER_SIZE, D3D11_BIND_SHADER_RESOURCE,
                                     D3D11_USAGE_DYNAMIC, D3D11_CPU_ACCESS_WRITE);
-  CHECK(SUCCEEDED(D3D::device->CreateBuffer(&texel_buf_desc, nullptr, &m_texel_buffer)),
-        "Creating texel buffer failed");
+  HRESULT hr = D3D::device->CreateBuffer(&texel_buf_desc, nullptr, &m_texel_buffer);
+  ASSERT_MSG(VIDEO, SUCCEEDED(hr), "Creating texel buffer failed: {}", DX11HRWrap(hr));
   if (!m_texel_buffer)
     return false;
 
@@ -133,7 +135,7 @@ bool VertexManager::MapTexelBuffer(u32 required_size, D3D11_MAPPED_SUBRESOURCE& 
   {
     // Restart buffer.
     HRESULT hr = D3D::context->Map(m_texel_buffer.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &sr);
-    CHECK(SUCCEEDED(hr), "Map texel buffer");
+    ASSERT_MSG(VIDEO, SUCCEEDED(hr), "Failed to map texel buffer: {}", DX11HRWrap(hr));
     if (FAILED(hr))
       return false;
 
@@ -143,7 +145,7 @@ bool VertexManager::MapTexelBuffer(u32 required_size, D3D11_MAPPED_SUBRESOURCE& 
   {
     // Don't overwrite the earlier-used space.
     HRESULT hr = D3D::context->Map(m_texel_buffer.Get(), 0, D3D11_MAP_WRITE_NO_OVERWRITE, 0, &sr);
-    CHECK(SUCCEEDED(hr), "Map texel buffer");
+    ASSERT_MSG(VIDEO, SUCCEEDED(hr), "Failed to map texel buffer: {}", DX11HRWrap(hr));
     if (FAILED(hr))
       return false;
   }
@@ -242,7 +244,7 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
   *out_base_index = (cursor + vertexBufferSize) / sizeof(u16);
 
   D3D::context->Map(m_buffers[m_current_buffer].Get(), 0, MapType, 0, &map);
-  u8* mappedData = reinterpret_cast<u8*>(map.pData);
+  u8* mappedData = static_cast<u8*>(map.pData);
   if (vertexBufferSize > 0)
     std::memcpy(mappedData + cursor, m_base_buffer_pointer, vertexBufferSize);
   if (indexBufferSize > 0)
@@ -253,30 +255,54 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
 
   ADDSTAT(g_stats.this_frame.bytes_vertex_streamed, vertexBufferSize);
   ADDSTAT(g_stats.this_frame.bytes_index_streamed, indexBufferSize);
+}
 
+void VertexManager::BindCommittedBuffer(u32 vertex_stride)
+{
   D3D::stateman->SetVertexBuffer(m_buffers[m_current_buffer].Get(), vertex_stride, 0);
   D3D::stateman->SetIndexBuffer(m_buffers[m_current_buffer].Get());
 }
 
 void VertexManager::UploadUniforms()
 {
-  if (VertexShaderManager::dirty)
+  auto& system = Core::System::GetInstance();
+
+  auto& vertex_shader_manager = system.GetVertexShaderManager();
+  if (vertex_shader_manager.dirty)
   {
-    UpdateConstantBuffer(m_vertex_constant_buffer.Get(), &VertexShaderManager::constants,
+    UpdateConstantBuffer(m_vertex_constant_buffer.Get(), &vertex_shader_manager.constants,
                          sizeof(VertexShaderConstants));
-    VertexShaderManager::dirty = false;
+    vertex_shader_manager.dirty = false;
   }
-  if (GeometryShaderManager::dirty)
+
+  auto& geometry_shader_manager = system.GetGeometryShaderManager();
+  if (geometry_shader_manager.dirty)
   {
-    UpdateConstantBuffer(m_geometry_constant_buffer.Get(), &GeometryShaderManager::constants,
+    UpdateConstantBuffer(m_geometry_constant_buffer.Get(), &geometry_shader_manager.constants,
                          sizeof(GeometryShaderConstants));
-    GeometryShaderManager::dirty = false;
+    geometry_shader_manager.dirty = false;
   }
-  if (PixelShaderManager::dirty)
+
+  auto& pixel_shader_manager = system.GetPixelShaderManager();
+  if (pixel_shader_manager.dirty)
   {
-    UpdateConstantBuffer(m_pixel_constant_buffer.Get(), &PixelShaderManager::constants,
+    UpdateConstantBuffer(m_pixel_constant_buffer.Get(), &pixel_shader_manager.constants,
                          sizeof(PixelShaderConstants));
-    PixelShaderManager::dirty = false;
+    pixel_shader_manager.dirty = false;
+  }
+
+  if (pixel_shader_manager.custom_constants_dirty)
+  {
+    if (m_last_custom_buffer_size < pixel_shader_manager.custom_constants.size())
+    {
+      m_custom_constant_buffer =
+          AllocateConstantBuffer(static_cast<u32>(pixel_shader_manager.custom_constants.size()));
+    }
+    UpdateConstantBuffer(m_custom_constant_buffer.Get(),
+                         pixel_shader_manager.custom_constants.data(),
+                         static_cast<u32>(pixel_shader_manager.custom_constants.size()));
+    m_last_custom_buffer_size = pixel_shader_manager.custom_constants.size();
+    pixel_shader_manager.custom_constants_dirty = false;
   }
 
   D3D::stateman->SetPixelConstants(
@@ -284,5 +310,6 @@ void VertexManager::UploadUniforms()
       g_ActiveConfig.bEnablePixelLighting ? m_vertex_constant_buffer.Get() : nullptr);
   D3D::stateman->SetVertexConstants(m_vertex_constant_buffer.Get());
   D3D::stateman->SetGeometryConstants(m_geometry_constant_buffer.Get());
+  D3D::stateman->SetCustomConstants(m_custom_constant_buffer.Get());
 }
 }  // namespace DX11
